@@ -9,7 +9,7 @@ import type { ContextResult, CoreSettings, OverviewResult } from "./core-types";
 type Caller = { kind: "owner"; via: string } | { kind: "module"; module: string; moduleId: string; hash: string }
   | { kind: "provider"; runId: string } | { kind: "kernel" };
 type Reply = { error?: string; errorCode?: string; result?: { result?: unknown } };
-type Call = { params: { target?: unknown; args: Record<string, unknown> } };
+type Call = { params: { target?: unknown; args: Record<string, unknown>; key?: string } };
 type Health = { phase: string; error: string | null; lastCheckAt: string | null; budget: { starts: number }; sourceError?: string };
 type Overview = OverviewResult & { health: Health; sources: { sourceIdentity: string; cursor: string; coverage: { complete: boolean } }[] };
 const ids = { mind: "app-mind-sdk", chat: "app-chat-sdk", web: "app-web-sdk", notify: "app-notify-sdk", author: "app-author-sdk" };
@@ -61,7 +61,10 @@ try {
     "web.component-set": () => ({ name: "MindWorkspace", type: `${ids.mind}:MindWorkspace`, revision: "sdk-component" }),
     "web.page-set": (args: Record<string, unknown>) => ({ id: args.id, catalog: "sdk-catalog" }),
     "timers.list": () => ({ items: scheduled ? [scheduled] : [], nextCursor: null }),
-    "timers.set": (args: Record<string, unknown>) => (scheduled = { ...args, revision: "sdk-timer", status: "active" }),
+    "timers.set": (args: Record<string, unknown>, options: { key?: string }) => {
+      assert.ok(options.key, "Timer writes require a call key");
+      return scheduled = { ...args, revision: "sdk-timer", status: "active" };
+    },
     "chat.observation-scope": () => ({ epoch, revision: 0, enabled: true, startCursor: "0" }),
     "chat.observations": () => ({ source: { moduleId: ids.chat, hash, epoch }, events: [], nextCursor: "0", hasMore: false,
       coverage: { complete: true }, capturedAt: now, scopeRevision: 0 }),
@@ -102,6 +105,7 @@ try {
   assert.equal(scheduled.id, "mind-core");
   assert.deepEqual(scheduled.schedule, { kind: "every", milliseconds: 60000 });
   assert.equal(callsFor("timers.set").length, 1);
+  assert.equal(callsFor("timers.set")[0].params.key, "mind-core:register");
   assert.equal(callsFor("timers.list").length, 2, "Activation reconciles the existing core timer");
 
   const initial = await overview();
@@ -141,6 +145,14 @@ try {
   await denied("settings", { ...patch, revision: -1 }, owner, "CONFLICT");
   await denied("settings", { patch: "true", revision: receipt.value.revision }, owner, "invalid");
   assert.deepEqual(decode(await request("settings")), receipt.value, "Conflicts leave settings unchanged");
+  const visibilityRevision = (await overview()).visibilityRevision;
+  for (const [index, reference] of [{}, null, 17, ""].entries()) {
+    await denied("pursue", { input: JSON.stringify({ actionKey: `invalid-reference:${index}`,
+      expectedVisibilityRevision: visibilityRevision, expectedRevision: 0, semanticKey: "invalid-reference",
+      goal: "Reject malformed evidence references without failing the application", completionCriteria: ["No pursuit is created"],
+      scope: {}, reason: "explicit-goal", evidenceRefs: [reference], understandingRefs: [] }) }, owner, "INVALID_INPUT");
+  }
+  assert.deepEqual((await overview()).items, [], "Invalid references leave Mind usable and unchanged");
 
   const checked = decode<Health>(await request("check"));
   assert.equal(checked.sourceError, undefined); assert.equal(checked.error, null);

@@ -77,7 +77,7 @@ async function register(){
    for(const page of [{id:'main',title:'Mind',view:'overview'},{id:'settings',title:'Mind 设置',view:'settings'}])await chrona.call({moduleId:chrona.dependencies['web'],tool:'page-set'},{id:page.id,title:page.title,layout:'workspace',spec:{root:'mind',elements:{mind:{type:component.type,props:{view:page.view},children:[]}}}});
    pagesReady=true;
   }
-  const timer=await chrona.call('timers.list',{}) as {items:{id:string}[]};if(!timer.items.some(t=>t.id==='mind-core'))await chrona.call('timers.set',{id:'mind-core',schedule:{kind:'every',milliseconds:60000}});
+  const timer=await chrona.call('timers.list',{}) as {items:{id:string}[]};if(!timer.items.some(t=>t.id==='mind-core'))await chrona.call('timers.set',{id:'mind-core',schedule:{kind:'every',milliseconds:60000}},{key:'mind-core:register'});
  }catch(error){log('registration_failed',error);}finally{maintaining=false;}
 }
 let sourceError:string|undefined;

@@ -70,6 +70,7 @@ export class CoreMindService {
   private refs(tx: CoreTransaction, ids: string[], access: CoreAccess): Evidence[] {
     if (!Array.isArray(ids) || ids.length > 100) fail("INVALID_INPUT", "Expected bounded evidence references");
     return unique(ids).map(id => {
+      text(id, "evidence reference", 512);
       const item = get(tx, "evidence", id); authorized(access, item.scope);
       if (item.retractedAt || item.expiredAt) fail("CONFLICT", "Evidence is retracted or expired");
       if(item.sourceIdentity!=='owner'&&item.sourceIdentity!=='mind-owner'&&!tx.list('checkpoint').some(cp=>cp.sourceIdentity===item.sourceIdentity&&cp.epoch===item.epoch&&cp.scopeRevision===item.scopeRevision&&cp.coverage.complete))fail('CONFLICT','Evidence source coverage is incomplete or has changed');
