@@ -1,0 +1,286 @@
+import { expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CoreMindStore } from './core-store';
+import { CoreMindService } from './core-service';
+import { CoreActions, type DocumentArtifact } from './core-actions';
+import { CoreRuntime, RUNTIME_ACCESS } from './core-runtime';
+import type { CoreCall, Target, ToolFact } from './core-execution';
+import type { CoreAccess, ProgressCandidate } from './core-types';
+import type { VerdictInput } from './core-verification';
+
+const identity = { moduleId: 'mind-integration', hash: 'mind-current-version' };
+const owner: CoreAccess = { subject: 'owner', role: 'owner', scopes: [{}] };
+const scope = { sessionId: 'train-planning' };
+const criterion = 'Give departure and arrival times supported by the original timetable, arriving before noon';
+const body = 'Take the 09:00 train, arriving at 11:30 before noon. Source: the timetable supplied in the original user message.';
+type Run = { runId: string; contextId: string; status: string; active: boolean; ended: boolean; args: Record<string, unknown>; items: unknown[] };
+
+/** Bounded transport double: only Agent/directory I/O is replaced. Results survive runtime restarts. */
+class AgentGateway {
+  readonly db: Database;
+  readonly stops: string[] = [];
+  constructor(directory: string) {
+    this.db = new Database(join(directory, 'test-agent.sqlite'));
+    this.db.exec('CREATE TABLE runs(key TEXT PRIMARY KEY, json TEXT NOT NULL)');
+  }
+  runs(): Run[] { return (this.db.query('SELECT json FROM runs ORDER BY rowid').all() as { json: string }[]).map(r => JSON.parse(r.json) as Run); }
+  get(id: string) { const run = this.runs().find(r => r.runId === id); if (!run) throw Error('Unknown test run'); return run; }
+  save(run: Run) { this.db.query('UPDATE runs SET json=? WHERE json_extract(json,\'$.runId\')=?').run(JSON.stringify(run), run.runId); }
+  finish(id: string, status = 'finished') { const run = this.get(id); run.status = status; run.active = false; run.ended = true; this.save(run); }
+  result(id: string, tool: string, output: unknown, callId = tool) {
+    const run = this.get(id), target = { moduleId: identity.moduleId, tool };
+    expect(run.args.tools as Target[]).toContainEqual(target);
+    expect(run.active).toBe(true);
+    const value: ToolFact = { ...identity, runId: id, callId, target, status: 'succeeded', outputState: 'complete', output: { json: JSON.stringify(output) } };
+    run.items.push({ kind: 'tool-result', payload: { type: 'tool-result', value } });
+    if (run.items.length > 50) throw Error('Fixture observation bound exceeded');
+    this.save(run);
+  }
+  readonly call: CoreCall = async (target, args, options) => {
+    if (target === 'modules.list') return { items: [{ id: identity.moduleId, name: 'mind' }], nextCursor: null };
+    if (target === 'modules.describe') return { items: [], nextCursor: null };
+    if (target === 'agent.run') {
+      expect(options?.key).toBeTruthy();
+      const prior = this.db.query('SELECT json FROM runs WHERE key=?').get(options!.key!) as { json: string } | null;
+      if (prior) { const run = JSON.parse(prior.json) as Run; expect(run.args).toEqual(args); return run; }
+      expect(this.runs().filter(r => r.active)).toHaveLength(0);
+      expect(args).toMatchObject({ lane: 'background', content: [], kind: 'conversation' });
+      for (const field of ['contextId', 'model', 'profile', 'cwd']) expect(args[field]).toBeUndefined();
+      const n = this.runs().length + 1;
+      const run: Run = { runId: `run-${n}`, contextId: `context-${n}`, status: 'running', active: true, ended: false, args: structuredClone(args), items: [] };
+      this.db.query('INSERT INTO runs(key,json) VALUES(?,?)').run(options!.key!, JSON.stringify(run));
+      return run;
+    }
+    if (target === 'agent.read') {
+      expect(args.limit).toBe(100); expect(args.waitMs).toBe(0);
+      const run = this.get(String(args.runId));
+      return { run, items: run.items, ended: run.ended, nextCursor: null, interactions: [] };
+    }
+    if (target === 'agent.stop') { const run = this.get(String(args.runId)); this.stops.push(run.runId); return { ...run, stopConfirmed: !run.active }; }
+    throw Error(`Unexpected integration gateway call ${JSON.stringify(target)}`);
+  };
+  close() { this.db.close(); }
+}
+
+class Harness {
+  readonly directory = mkdtempSync(join(tmpdir(), 'mind-runtime-integration-'));
+  readonly gateway = new AgentGateway(this.directory);
+  store!: CoreMindStore;
+  service!: CoreMindService;
+  actions!: CoreActions;
+  runtime!: CoreRuntime;
+  constructor() { this.open(); }
+  private open() {
+    this.store = new CoreMindStore(this.directory); this.service = new CoreMindService(this.store);
+    this.actions = new CoreActions(this.directory, this.service);
+    this.runtime = new CoreRuntime(this.store, this.service, this.gateway.call, () => identity, this.actions);
+  }
+  restart() { this.runtime.close(); this.actions.close(); this.store.close(); this.open(); }
+  cleanup() { this.runtime.close(); this.actions.close(); this.store.close(); this.gateway.close(); rmSync(this.directory, { recursive: true, force: true }); }
+  ingest(text: string, complete = true) {
+    const state = this.store.read(), checkpoint = state.checkpoints[0], now = new Date().toISOString();
+    this.service.ingest({ sourceIdentity: 'chat-source', epoch: 'epoch-1', expectedCheckpointRevision: checkpoint?.revision ?? 0,
+      nextCursor: '2', scopeRevision: 1, capturedAt: now, coverage: { complete, ...(complete ? {} : { gap: 'snapshot page still missing' }) },
+      events: checkpoint ? [] : [{ id: 'request', eventId: 'request', cursor: '1', object: { kind: 'message', id: 'request', revision: 1 },
+        kind: 'message', actor: 'user', scope, origin: { rootId: scope.sessionId }, occurredAt: now, receivedAt: now,
+        scopeRevision: 1, content: { text, truncated: false } },{id:'foreground-ended',eventId:'foreground-ended',cursor:'2',object:{kind:'execution',id:scope.sessionId,revision:1},kind:'operation',actor:'application',scope,origin:{rootId:scope.sessionId},occurredAt:now,receivedAt:now,scopeRevision:1,content:{text:JSON.stringify({foregroundActive:false,pendingCommand:false,terminalConfirmed:true}),truncated:false}}] }, RUNTIME_ACCESS);
+    return this.store.read().evidence.find(e=>e.actor==='user')!.id;
+  }
+  get pursuit() { return this.store.read().pursuits[0]; }
+  workerAccess() { return this.runtime.accessForCaller('adapter:mind', true,this.runtime.journal.outstanding()?.runId??undefined); }
+  mutation(key: string) { return { actionKey: key, expectedRevision: this.pursuit.revision, expectedVisibilityRevision: this.store.read().visibilityRevision, pursuitId: this.pursuit.id }; }
+  async discover() {
+    const evidence = this.ingest('Please prepare a train itinerary arriving before noon. The published timetable says depart 09:00 and arrive 11:30. Remember that I prefer trains.');
+    await this.runtime.tick(true);
+    const understand = this.gateway.runs()[0];
+    expect(understand.args.tools as Target[]).toContainEqual({ moduleId: identity.moduleId, tool: 'remember' });
+    expect(understand.args.tools as Target[]).not.toContainEqual({ moduleId: identity.moduleId, tool: 'action' });
+    const access = this.workerAccess();
+    const remembered = this.service.remember({ actionKey: 'request:preference', expectedRevision: 0, expectedVisibilityRevision: this.store.read().visibilityRevision,
+      kind: 'preference', value: 'Prefers trains', scope, explicitness: 'explicit', supportingRefs: [evidence] }, access);
+    this.gateway.result(understand.runId, 'remember', remembered);
+    const pursued = this.service.pursue({ actionKey: 'request:itinerary', expectedRevision: 0, expectedVisibilityRevision: this.store.read().visibilityRevision,
+      semanticKey: 'train-before-noon', goal: 'Prepare a useful train itinerary arriving before noon', completionCriteria: [criterion], scope,
+      reason: 'explicit-goal', evidenceRefs: [evidence], understandingRefs: [remembered.value!.id] }, access);
+    this.gateway.result(understand.runId, 'pursue', pursued);
+    expect(this.pursuit.currentActor).toBeUndefined(); expect(this.actions.list(this.pursuit.id)).toEqual([]);
+    expect(() => this.actions.create({ ...this.mutation('pre-claim-document'), target: 'document', arguments: {},
+      document: { title: 'Too early', body } }, access)).toThrow('responsibility');
+    this.gateway.finish(understand.runId); await this.runtime.tick(true);
+    const worker = this.gateway.runs()[1];
+    expect(worker).toBeDefined(); expect(this.pursuit.currentActor?.runRef).toBe(worker.runId);
+    return { evidence, worker };
+  }
+  produce(worker: Run): { document: DocumentArtifact; candidate: ProgressCandidate } {
+    const document = this.actions.create({ ...this.mutation('itinerary:document'), target: 'document', arguments: {}, document: { title: 'Train itinerary', body } }, this.workerAccess());
+    this.gateway.result(worker.runId, 'action', document, 'create-itinerary');
+    const progress = this.service.progress({ ...this.mutation('itinerary:progress'), summary: 'Itinerary ready for independent review',
+      artifactRefs: [document.ref], originalReceiptRef: 'create-itinerary', evidenceRefs: this.pursuit.evidenceRefs, desiredStatus: 'done' }, this.workerAccess());
+    this.gateway.result(worker.runId, 'progress', progress);
+    return { document, candidate: progress.value! };
+  }
+  verdict(document: DocumentArtifact, candidate: ProgressCandidate, decision: VerdictInput['decision'] = 'accepted') {
+    const verifier = this.runtime.verification.outstanding()!;
+    const input: VerdictInput = { requestId: verifier.id, candidateRef: candidate.receipt, artifacts: [{ ref: document.ref, digest: document.digest }], decision,
+      observations: [{ criterion, satisfied: decision === 'accepted', observation: decision === 'accepted'
+        ? 'The itinerary gives 09:00 departure and 11:30 arrival, matches the source timetable, and arrives before noon.'
+        : 'The proposed itinerary needs another check against the current timetable before it is useful.', artifactRefs: [document.ref],
+      ...(decision === 'accepted' ? { excerpt: 'Take the 09:00 train, arriving at 11:30 before noon.' } : {}) }] };
+    return this.runtime.verdict(input, {...identity,runId:verifier.runId!});
+  }
+}
+
+test('ingested evidence becomes understanding and a pursuit; bound actual work completes only after a separate terminal verifier reads and accepts the artifact', async () => {
+  const f = new Harness(); try {
+    const { evidence, worker } = await f.discover();
+    expect(f.store.read().understandings[0]).toMatchObject({ value: 'Prefers trains', supportingRefs: [evidence], status: 'active' });
+    const { document, candidate } = f.produce(worker);
+    expect(f.actions.read(document.ref).body).toBe(body);
+    await f.runtime.tick(true);
+    expect(f.pursuit.status).toBe('active'); expect(f.runtime.verification.outstanding()).toBeUndefined(); expect(f.gateway.runs()).toHaveLength(2);
+    f.restart(); await f.runtime.tick(true);
+    expect(f.gateway.runs()).toHaveLength(2); expect(f.pursuit.currentActor?.runRef).toBe(worker.runId);
+    f.gateway.finish(worker.runId); await f.runtime.tick(true);
+    const verifier = f.runtime.verification.outstanding()!;
+    expect(verifier.runId).not.toBe(worker.runId); expect(verifier.contextId).not.toBe(worker.contextId);
+    expect(verifier.tools).toEqual(['artifact', 'detail', 'verdict'].map(tool => ({ moduleId: identity.moduleId, tool })));
+    expect(f.pursuit.status).toBe('active'); expect(f.pursuit.currentActor?.runRef).toBe(worker.runId);
+    f.restart();
+    const read = f.actions.read(document.ref);
+    expect(read.body).toBe(body); f.gateway.result(verifier.runId!, 'artifact', read);
+    const receipt = f.verdict(document, candidate); f.gateway.result(verifier.runId!, 'verdict', receipt);
+    await f.runtime.tick(true); expect(f.pursuit.status).toBe('active'); expect(f.pursuit.verification).toBeUndefined();
+    f.gateway.finish(verifier.runId!); await f.runtime.tick(true);
+    expect(f.runtime.lastError).toBeNull(); expect(f.pursuit.status).toBe('done'); expect(f.pursuit.currentActor).toBeUndefined();
+    expect(f.pursuit.artifactRefs).toEqual([document.ref]); expect(f.store.read().candidates[0].state).toBe('applied');
+    expect(f.pursuit.verification?.method).toContain(`run=${verifier.runId}`);
+    f.restart(); await f.runtime.tick(true); expect(f.pursuit.status).toBe('done'); expect(f.gateway.runs()).toHaveLength(3);
+  } finally { f.cleanup(); }
+});
+
+test('ordinary conversation settles a durable no-op watermark without creating understanding, pursuit or artifacts', async () => {
+  const f = new Harness(); try {
+    f.ingest('What is 2 + 2?'); await f.runtime.tick(true);
+    const run = f.gateway.runs()[0]; expect(String(run.args.prompt)).toContain('What is 2 + 2?');
+    f.gateway.finish(run.runId); await f.runtime.tick(true); f.restart(); await f.runtime.tick(true);
+    const state = f.store.read(); expect(state.understandings).toEqual([]); expect(state.pursuits).toEqual([]); expect(state.actions).toEqual([]);
+    expect(state.candidates).toEqual([]); expect(f.gateway.runs()).toHaveLength(1); expect(f.runtime.view().phase).toBe('idle');
+  } finally { f.cleanup(); }
+});
+
+test('document action cannot run before bound pursuit responsibility or under a different caller', async () => {
+  const f = new Harness(); try {
+    const { worker } = await f.discover();
+    const input = { ...f.mutation('unauthorized-document'), target: 'document', arguments: {}, document: { title: 'Unauthorized', body } };
+    expect(() => f.actions.create(input, f.runtime.accessForCaller('other-application', false))).toThrow('responsibility');
+    expect(() => f.actions.create(input, { ...RUNTIME_ACCESS, execution: { actor: 'mind', runRef: 'other-run' } })).toThrow('responsibility');
+    expect(f.actions.list(f.pursuit.id)).toEqual([]);
+    expect(f.workerAccess().execution?.runRef).toBe(worker.runId);
+    f.produce(worker); expect(f.actions.list(f.pursuit.id)).toHaveLength(1);
+  } finally { f.cleanup(); }
+});
+
+for (const withdrawal of ['pause', 'forget'] as const) test(`${withdrawal} while a worker has a done candidate prevents completion and waits for confirmed termination`, async () => {
+  const f = new Harness(); try {
+    const { evidence, worker } = await f.discover(); const { document } = f.produce(worker);
+    if (withdrawal === 'pause') f.service.control({ actionKey: 'owner:pause', expectedVisibilityRevision: f.store.read().visibilityRevision,
+      kind: 'pursuit', id: f.pursuit.id, expectedRevision: f.pursuit.revision, operation: 'pause' }, owner);
+    else f.service.forget({ actionKey: 'owner:forget', expectedVisibilityRevision: f.store.read().visibilityRevision, target: { kind: 'evidence', id: evidence } }, owner);
+    await f.runtime.tick(true);
+    expect(f.gateway.stops).toContain(worker.runId); expect(f.runtime.journal.outstanding()?.stopConfirmed).toBe(false);
+    expect(f.pursuit.status).not.toBe('done'); expect(f.pursuit.currentActor?.runRef).toBe(worker.runId);
+    expect(() => f.actions.create({ ...f.mutation('late-action'), target: 'document', arguments: {}, document: { title: 'Late', body } }, f.workerAccess())).toThrow();
+    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(2);
+    f.gateway.finish(worker.runId, 'cancelled'); await f.runtime.tick(true);
+    expect(f.pursuit.status).not.toBe('done'); expect(f.pursuit.verification).toBeUndefined(); expect(f.runtime.verification.outstanding()).toBeUndefined();
+    expect(f.pursuit.currentActor).toBeUndefined(); expect(f.runtime.journal.outstanding()).toBeUndefined(); expect(f.gateway.runs()).toHaveLength(2);
+    if (withdrawal === 'pause') expect(f.actions.read(document.ref).body).toBe(body);
+  } finally { f.cleanup(); }
+});
+
+test('failed work is recorded as failed and cannot immediately redispatch the same unchanged pursuit, including after restart', async () => {
+  const f = new Harness(); try {
+    const { worker } = await f.discover(); f.gateway.finish(worker.runId, 'failed'); await f.runtime.tick(true);
+    expect(f.runtime.journal.all().find(e => e.runId === worker.runId)?.status).toBe('failed');
+    expect(f.pursuit.status).not.toBe('done'); expect(f.pursuit.currentActor).toBeUndefined();
+    for (let n = 0; n < 3; n++) await f.runtime.tick(true);
+    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(2); expect(f.runtime.verification.outstanding()).toBeUndefined();
+  } finally { f.cleanup(); }
+});
+
+test('incomplete source coverage blocks both understanding and pursuit dispatch until ingestion commits complete coverage', async () => {
+  const f = new Harness(); try {
+    const evidence = f.ingest('Prepare the train itinerary from 09:00 to 11:30.', true);
+    // An already recorded pursuit must obey a later coverage loss as well as new understanding.
+    f.service.pursue({ actionKey: 'explicit-source-goal', expectedVisibilityRevision: f.store.read().visibilityRevision, expectedRevision: 0,
+      semanticKey: 'train-before-noon', goal: 'Prepare train itinerary', completionCriteria: [criterion], scope, reason: 'explicit-goal', evidenceRefs: [evidence] }, RUNTIME_ACCESS);
+    f.store.update(tx=>{const cp=tx.list('checkpoint')[0]!;tx.put('checkpoint',{...cp,revision:cp.revision+1,coverage:{complete:false,gap:'retention_gap'}});});
+    await f.runtime.tick(true); expect(f.gateway.runs()).toEqual([]);
+    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toEqual([]); expect(f.pursuit.currentActor).toBeUndefined();
+    f.ingest('', true); await f.runtime.tick(true);
+    expect(f.gateway.runs()).toHaveLength(1); expect(f.pursuit.currentActor?.runRef).toBe(f.gateway.runs()[0].runId);
+  } finally { f.cleanup(); }
+});
+
+for (const decision of ['needs-work', 'rejected'] as const) test(`independent ${decision} never completes and releases the terminal worker without wedging subsequent ticks`, async () => {
+  const f = new Harness(); try {
+    const { worker } = await f.discover(); const { document, candidate } = f.produce(worker);
+    f.gateway.finish(worker.runId); await f.runtime.tick(true);
+    const verifier = f.runtime.verification.outstanding()!;
+    f.gateway.result(verifier.runId!, 'artifact', f.actions.read(document.ref));
+    f.gateway.result(verifier.runId!, 'verdict', f.verdict(document, candidate, decision));
+    f.gateway.finish(verifier.runId!); await f.runtime.tick(true);
+    expect(f.pursuit.status).not.toBe('done'); expect(f.runtime.lastError).toBeNull(); expect(f.pursuit.currentActor).toBeUndefined();
+    f.restart(); await f.runtime.tick(true); expect(f.runtime.lastError).toBeNull(); expect(f.gateway.runs()).toHaveLength(3);
+  } finally { f.cleanup(); }
+});
+
+test('a failed independent verifier cannot establish completion even with a persisted accepted verdict', async () => {
+  const f = new Harness(); try {
+    const { worker } = await f.discover(); const { document, candidate } = f.produce(worker);
+    f.gateway.finish(worker.runId); await f.runtime.tick(true);
+    const verifier = f.runtime.verification.outstanding()!;
+    f.gateway.result(verifier.runId!, 'artifact', f.actions.read(document.ref));
+    const receipt = f.verdict(document, candidate);
+    f.gateway.result(verifier.runId!, 'verdict', receipt);
+    f.gateway.finish(verifier.runId!, 'failed'); await f.runtime.tick(true);
+    expect(f.pursuit.status).not.toBe('done');
+    expect(f.pursuit.verification).toBeUndefined();
+    expect(f.runtime.lastError).toBeNull();
+    expect(f.pursuit.currentActor).toBeUndefined();
+  } finally { f.cleanup(); }
+});
+
+for (const missing of ['artifact-read', 'selected-verdict-result'] as const) test(`a terminal verifier missing ${missing} cannot complete from a submitted verdict alone`, async () => {
+  const f = new Harness(); try {
+    const { worker } = await f.discover(); const { document, candidate } = f.produce(worker);
+    f.gateway.finish(worker.runId); await f.runtime.tick(true);
+    const verifier = f.runtime.verification.outstanding()!;
+    if (missing !== 'artifact-read') f.gateway.result(verifier.runId!, 'artifact', f.actions.read(document.ref));
+    const receipt = f.verdict(document, candidate);
+    if (missing !== 'selected-verdict-result') f.gateway.result(verifier.runId!, 'verdict', receipt);
+    f.gateway.finish(verifier.runId!); await f.runtime.tick(true);
+    expect(f.store.read().candidates.find(c=>c.id===candidate.id)?.state).toBe('rejected');
+    expect(f.pursuit.waitReason).toContain('unverified');
+    expect(f.pursuit.status).not.toBe('done'); expect(f.pursuit.verification).toBeUndefined();
+    expect(f.store.read().candidates[0].state).not.toBe('applied');
+    expect(f.runtime.lastError).toBeNull(); expect(f.pursuit.currentActor).toBeUndefined();
+    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(3);
+  } finally { f.cleanup(); }
+});
+
+test('forget removes verifier excerpts and prompts, withdrawn documents and old execution authority while retaining original run identity',async()=>{
+ const f=new Harness();try{const {worker,evidence}=await f.discover();const {document,candidate}=f.produce(worker);f.gateway.finish(worker.runId);await f.runtime.tick(true);
+ const verifier=f.runtime.verification.outstanding()!;const receipt=f.verdict(document,candidate);expect(receipt.receipt).toBeTruthy();
+ expect(f.runtime.verification.journal.db.query('SELECT count(*) AS n FROM verification_verdicts').get()).toEqual({n:1});
+ f.service.forget({actionKey:'forget-source',expectedVisibilityRevision:f.store.read().visibilityRevision,target:{kind:'evidence',id:evidence}},owner);
+ const cleaned=f.runtime.cleanupWithdrawn();expect(cleaned.deferred).toBe(0);expect(()=>f.actions.read(document.ref)).toThrow('not found');
+ expect(f.runtime.verification.journal.db.query('SELECT count(*) AS n FROM verification_verdicts').get()).toEqual({n:0});
+ const r=f.runtime.verification.journal.db.query('SELECT json FROM verification_requests WHERE id=?').get(verifier.id) as {json:string};expect(r.json).not.toContain('excerpt');
+ const e=f.runtime.verification.journal.get(verifier.id);expect(e.runId).toBe(verifier.runId);expect(e.args).toEqual({});expect(e.stopRequested).toBe(true);
+ expect(f.runtime.accessForCaller('self',true,worker.runId).execution).toBeUndefined();
+ }finally{f.cleanup();}
+});
