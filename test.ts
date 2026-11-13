@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // @ts-expect-error Chrona supplies this test kernel at author-test runtime.
@@ -93,6 +93,8 @@ try {
   assert.ok(typeof registration.args.css === "string" && registration.args.css.length > 0);
   assert.ok((registration.args.tools as string[]).includes("overview"));
   assert.ok((registration.args.tools as string[]).includes("settings"));
+  const manifest = JSON.parse(await readFile(join(import.meta.dir, "module.json"), "utf8")) as {tools: {name: string; visibility: string[]}[]};
+  for (const name of registration.args.tools as string[]) assert.ok(manifest.tools.some(tool => tool.name === name && tool.visibility.includes("owner")), `Page tool ${name} is not user-visible`);
   const pages = callsFor("web.page-set").slice(-2);
   assert.deepEqual(pages.map(call => call.params.args.id).sort(), ["main", "settings"]);
   for (const page of pages) {
