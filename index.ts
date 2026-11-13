@@ -35,7 +35,7 @@ const proof=new CoreDeliveryAdmission(chrona.paths.data,runtime.journal);
 const delivery:CoreDelivery=new CoreDelivery(chrona.paths.data,service,rawCall,{worker:runRef=>runtime.journal.all().find(e=>e.runId===runRef),verifyAdmission:async r=>proof.verify(r),assertMaySubmit:pursuitId=>{if(runtime.pendingControl(pursuitId))throw new ModelError('conflict','A pending user control holds delivery submission');}});
 const observe:CoreCall=(target,args,options)=>runtime.observe(target,args,options,typeof target==='object'&&target.tool==='observation-scope'?'source-control':'source-data');
 const sources=new CoreSources(store,service,observe,async()=>{const id=chrona.dependencies['chat'];if(!id)return undefined;const rows=await directoryRows((target,args)=>runtime.observe(target,args,undefined,'source-control'));const row=rows.find(m=>m.id===id);return row?.activeHash?{moduleId:id,hash:row.activeHash}:undefined;});
-const TOOLS=['overview','detail','settings','context','remember','pursue','control','feedback','forget','progress','action','applications','delivery','artifact','verdict','admission-verdict','check','recovery'];
+const TOOLS=['overview','detail','settings','context','remember','pursue','control','feedback','forget','applications','delivery','artifact','check','recovery'];
 const tools=new Set(TOOLS);let pagesReady=false,maintaining=false,closed=false;
 const log=(event:string,error:unknown)=>console.error(JSON.stringify({component:'mind',event,error:error instanceof Error?error.message.slice(0,500):String(error).slice(0,500)}));
 async function directoryRows(call:CoreCall){

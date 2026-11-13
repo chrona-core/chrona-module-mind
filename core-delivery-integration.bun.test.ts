@@ -15,6 +15,7 @@ import type {CoreAccess} from './core-types';
 import {candidateAdmissionInputSchema,candidateAdmissionOutputSchema,candidateReceiptSchema} from '../../../../../../contracts/src/steward/module-candidates';
 import {moduleToolSchema} from '../../../../../../contracts/src/steward/module-tool';
 import {parseSubmit,parseReceipt} from '../author/contracts';
+import {createPages,type PageTool} from '../web/pages';
 
 const identity={moduleId:'mind-delivery-integration',hash:'b'.repeat(40)};
 const author={moduleId:'actual-author',hash:'a'.repeat(40)};
@@ -180,7 +181,11 @@ test('entry point enforces actual callers and keeps reconciling after source err
  const directory=mkdtempSync(join(tmpdir(),'mind-entry-delivery-')),gateway=new Gateway(directory);
  const handlers=new Map<string,(event:any)=>Promise<any>>();let disconnect:(()=>void)|undefined;
  class FakeModelError extends Error{constructor(readonly code:string,message:string){super(message);}}
- const sdk={chrona:{paths:{data:directory,module:import.meta.dir},dependencies:{chat:'chat-current',web:'web-current'},call:gateway.call},on:(name:string,handler:(event:any)=>Promise<any>)=>handlers.set(name,handler),onDisconnect:(handler:()=>void)=>{disconnect=handler;},ModelError:FakeModelError};
+ const manifest=JSON.parse(readFileSync(join(import.meta.dir,'module.json'),'utf8')) as {tools:unknown[]};
+ const pageTools=new Map<string,PageTool>(manifest.tools.map(value=>moduleToolSchema.parse(value)).filter(tool=>tool.visibility.includes('owner')).map(tool=>[tool.name,{moduleId:identity.moduleId,inputSchema:tool.parameters}]));
+ const pages=createPages({dataDir:join(directory,'web'),modules:async()=>[{id:identity.moduleId,name:'mind',status:'active',activeHash:identity.hash}],tools:async()=>pageTools});
+ const registeredCall:CoreCall=async(target,args,options)=>typeof target==='object'&&['component-set','page-set'].includes(target.tool)?pages.tool(target.tool,args,{kind:'module',module:'mind',moduleId:identity.moduleId,hash:identity.hash}):gateway.call(target,args,options);
+ const sdk={chrona:{paths:{data:directory,module:import.meta.dir},dependencies:{chat:'chat-current',web:'web-current'},call:registeredCall},on:(name:string,handler:(event:any)=>Promise<any>)=>handlers.set(name,handler),onDisconnect:(handler:()=>void)=>{disconnect=handler;},ModelError:FakeModelError};
  mock.module('chrona',()=>sdk);
  const ownerCaller={kind:'owner'},workerCaller={kind:'module',...identity};
  const tool=async(id:string,value?:Record<string,unknown>,caller:unknown=ownerCaller,executionRunId?:string)=>{
@@ -188,6 +193,9 @@ test('entry point enforces actual callers and keeps reconciling after source err
  };
  try{
   await import(`./index.ts?delivery-integration=${Date.now()}`);
+  for(let attempt=0;attempt<100&&!(await pages.get('mind','main'));attempt++)await Bun.sleep(10);
+  const registeredPage=await pages.get('mind','main');expect(registeredPage).not.toBeNull();
+  const extension=Object.values(registeredPage!.extensions!)[0]!;expect(extension.tools).toContain('applications');expect(extension.tools).toContain('delivery');expect(extension.tools).not.toContain('admission-verdict');
   await tool('pursue',{actionKey:'entry-goal',expectedRevision:0,expectedVisibilityRevision:0,semanticKey:'entry-goal',goal:'Prepare a useful timetable capability',completionCriteria:['Actual published timetable result'],scope:{},reason:'explicit-goal',evidenceRefs:[]});
   await tool('check');
   // Source observation no longer owns the coordinator await; wait for its actual asynchronous completion.
