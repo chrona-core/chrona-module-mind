@@ -89,9 +89,9 @@ describe("bounded local Mind context recall", () => {
     const { service, remember } = setup();
     const target = remember("Archive receipts offline using SQLite");
     remember("My SQLAlchemy examples are online");
-    remember("archive ".repeat(60));
+    const fallback = remember("archive ".repeat(60));
     expect(ids(service.context({ query: "ＳＱＬｉｔｅ receipts archive", scope: {}, limit: 1 }, owner))).toEqual([target.id]);
-    expect(ids(service.context({ query: "sql", scope: {}, limit: 1 }, owner))).not.toEqual([target.id]);
+    expect(ids(service.context({ query: "sql", scope: {}, limit: 1 }, owner))).toEqual([fallback.id]);
   });
 
   test("unmatched memories remain available and empty queries retain deterministic scoped fallback", () => {
