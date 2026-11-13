@@ -98,6 +98,7 @@ try {
   for (const page of pages) {
     assert.deepEqual(page.params.target, { moduleId: ids.web, tool: "page-set" });
     assert.equal(page.params.args.layout, "workspace");
+    assert.equal(page.params.args.purpose, page.params.args.id === "settings" ? "settings" : undefined);
     const spec = page.params.args.spec as { root: string; elements: Record<string, { type: string }> };
     assert.equal(spec.elements[spec.root].type, `${ids.mind}:MindWorkspace`);
   }
