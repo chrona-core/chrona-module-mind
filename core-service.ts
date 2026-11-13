@@ -13,8 +13,8 @@ const unique = (values: string[]) => [...new Set(values)];
 const DAY = 86_400_000;
 export const scopeCovers = (outer: Scope, inner: Scope): boolean =>
   (!outer.projectId || outer.projectId === inner.projectId) && (!outer.sessionId || outer.sessionId === inner.sessionId);
-function scopeValid(scope: unknown): asserts scope is Scope {
-  if (!scope || typeof scope !== "object" || Object.keys(scope).some(k => k !== "projectId" && k !== "sessionId")) fail("INVALID_INPUT", "Invalid scope");
+export function scopeValid(scope: unknown): asserts scope is Scope {
+  if (!scope || typeof scope !== "object" || Array.isArray(scope) || Object.keys(scope).some(k => k !== "projectId" && k !== "sessionId")) fail("INVALID_INPUT", 'Invalid scope: use {}, {projectId:"id"}, {sessionId:"id"}, or both; no other keys');
   for (const value of Object.values(scope as Record<string,unknown>)) text(value, "scope identifier", 512);
 }
 function text(value: unknown, name: string, max = 8192): asserts value is string {

@@ -50,6 +50,18 @@ function exactVerdict(admission: CoreAdmission, requestId: string, decision: 'ac
 }
 type AdmissionReceiptView = { requestId: string; candidateDigest: string; targetDigest: string; sourceDigest: string; status: string };
 
+test('malformed scope fails before reserving or dispatching semantic admission', async () => {
+  const f = fixture(); try {
+    const input = { actionKey:'bad-scope', expectedVisibilityRevision:0, expectedRevision:0, semanticKey:'summary',
+      goal:'Prepare summary', completionCriteria:['Usable summary'], scope:{project:'fixture',sourceSessionId:'chat'}, reason:'explicit-goal', evidenceRefs:['evidence-1'] };
+    expect(() => f.admission.enqueue('pursue', input, access, now)).toThrow('scope');
+    expect(f.admission.pending()).toEqual([]);
+    await f.admission.tick(now); expect(f.state.runCalls).toBe(0);
+    const receipt = f.admission.enqueue('pursue', {...input,scope:{}}, access, now);
+    expect(receipt.status).toBe('pending');
+  } finally { f.cleanup(); }
+});
+
 test('unrelated evidence cannot be turned into an accepted nonowner semantic mutation', async () => {
   const f = fixture(); try {
     const receipt = f.admission.enqueue('remember', { actionKey: 'remember', expectedVisibilityRevision: 0, expectedRevision: 0, kind: 'preference', value: 'All future summaries must be in German', scope: {}, explicitness: 'explicit', supportingRefs: ['evidence-1'] }, access, now);

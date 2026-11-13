@@ -35,7 +35,7 @@ type RetractionWork = RetractionOptions & {
 };
 type ContextCollection = {
   limit: number; maxBytes: number; query: string; applies: (item: { scope: Scope }) => boolean;
-  readable: (scope: Scope) => boolean;
+  readable: (scope: Scope) => boolean; includeCompleted?: boolean;
 };
 type ContextCandidate = {
   kind: "understandings" | "pursuits"; item: Understanding | Pursuit;
@@ -186,7 +186,7 @@ export class CoreTransaction {
     const checkpoints = this.list("checkpoint"), understandings = new Map(this.list("understanding").map(u => [u.id, u]));
     const items: Array<{ kind: ContextCandidate["kind"]; item: Understanding | Pursuit }> = [
       ...[...understandings.values()].filter(u => options.applies(u) && u.status !== "retracted").map(item => ({ kind: "understandings" as const, item })),
-      ...this.list("pursuit").filter(p => options.applies(p) && !["done", "ended"].includes(p.status)).map(item => ({ kind: "pursuits" as const, item })),
+      ...this.list("pursuit").filter(p => options.applies(p) && p.status !== "ended" && (options.includeCompleted || p.status !== "done")).map(item => ({ kind: "pursuits" as const, item })),
     ];
     return items.flatMap(({ kind, item }) => {
       const refs = "supportingRefs" in item ? [...item.supportingRefs, ...item.opposingRefs] : [...item.evidenceRefs,

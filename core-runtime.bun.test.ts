@@ -215,6 +215,31 @@ test('ordinary conversation settles a durable no-op watermark without creating u
   } finally { f.cleanup(); }
 });
 
+test('overlapping conversations retain evidence deferred until their foreground ends, including after restart', async () => {
+  const f = new Harness(); try {
+    f.ingest('A completed ordinary question');
+    const state = f.store.read(), original = state.evidence.find(e => e.actor === 'user')!;
+    const deferred = { ...original, id: 'deferred-user', eventId: 'deferred-user', object: { kind: 'message', id: 'deferred-user', revision: 1 },
+      scope: { sessionId: 'overlapping-chat' }, origin: { rootId: 'overlapping-chat' },
+      content: { text: 'Prepare the unfinished overlapping request', truncated: false } };
+    const execution = { ...deferred, id: 'deferred-execution', eventId: 'deferred-execution', actor: 'application' as const, kind: 'operation' as const,
+      object: { kind: 'execution', id: 'overlapping-chat', revision: 1 },
+      content: { text: JSON.stringify({foregroundActive:true,pendingCommand:false,terminalConfirmed:false}), truncated: false } };
+    f.store.update(tx => { tx.put('evidence', deferred); tx.put('evidence', execution); });
+    await f.runtime.tick(true);
+    const first = f.gateway.runs()[0]; expect(String(first.args.prompt)).not.toContain(deferred.content.text);
+    f.gateway.finish(first.runId); await f.runtime.tick(true); f.restart();
+    f.store.update(tx => tx.put('evidence', { ...execution, revision: 2,
+      content: { text: JSON.stringify({foregroundActive:false,pendingCommand:false,terminalConfirmed:true}), truncated:false } }));
+    await f.runtime.tick(true);
+    expect(f.gateway.runs()).toHaveLength(2);
+    const second = f.gateway.runs()[1]; expect(String(second.args.prompt)).toContain(deferred.content.text);
+    f.gateway.finish(second.runId); await f.runtime.tick(true); f.restart(); await f.runtime.tick(true);
+    expect(f.gateway.runs()).toHaveLength(2);
+    expect(f.store.read().pursuits).toEqual([]);
+  } finally { f.cleanup(); }
+});
+
 test('document action cannot run before bound pursuit responsibility or under a different caller', async () => {
   const f = new Harness(); try {
     const { worker } = await f.discover();
@@ -316,6 +341,56 @@ for (const missing of ['artifact-read', 'selected-verdict-result'] as const) tes
     expect(f.store.read().candidates[0].state).not.toBe('applied');
     expect(f.runtime.lastError).toBeNull(); expect(f.pursuit.currentActor).toBeUndefined();
     f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(5);
+  } finally { f.cleanup(); }
+});
+
+for (const completed of [false, true]) test(`background understanding sees authorized ${completed ? 'completed' : 'paused'} scoped history without broadening public context or reviving forgotten history`, async () => {
+  const f = new Harness();
+  try {
+    const evidence = f.ingest('For the earlier trip, only count paid tickets and list pending tickets separately.');
+    const understanding = f.service.remember({ actionKey: 'scoped-policy', expectedRevision: 0,
+      expectedVisibilityRevision: f.store.read().visibilityRevision, kind: 'preference', value: 'Only paid tickets count; pending tickets are separate',
+      scope, explicitness: 'explicit', supportingRefs: [evidence] }, owner).value!;
+    const pursuit = f.service.pursue({ actionKey: 'scoped-goal', expectedRevision: 0,
+      expectedVisibilityRevision: f.store.read().visibilityRevision, semanticKey: 'earlier-trip', goal: 'Reconcile the earlier trip tickets',
+      completionCriteria: ['Useful ticket totals'], scope, reason: 'explicit-goal', evidenceRefs: [evidence] }, owner).value!;
+    f.service.control({ actionKey: 'hold-earlier', expectedRevision: pursuit.revision,
+      expectedVisibilityRevision: f.store.read().visibilityRevision, kind: 'pursuit', id: pursuit.id, operation: 'pause' }, owner);
+    // Context-only fixture: completion semantics are covered by the full worker/verifier tests above.
+    if (completed) f.store.update(tx => { const p = tx.get('pursuit', pursuit.id)!; p.status = 'done'; p.paused = false; tx.put('pursuit', p); });
+    const checkpoint = f.store.read().checkpoints[0], now = new Date().toISOString();
+    f.service.ingest({ sourceIdentity: 'chat-source', epoch: 'epoch-1', expectedCheckpointRevision: checkpoint.revision,
+      nextCursor: '4', scopeRevision: 1, capturedAt: now, coverage: { complete: true }, events: [
+        { id: 'continue', eventId: 'continue', cursor: '3', object: { kind: 'message', id: 'continue', revision: 1 }, kind: 'message', actor: 'user', scope: {},
+          origin: { rootId: 'another-session' }, occurredAt: now, receivedAt: now, scopeRevision: 1, content: { text: 'Continue that trip accounting with the earlier rules.', truncated: false } },
+        { id: 'continue-ended', eventId: 'continue-ended', cursor: '4', object: { kind: 'execution', id: 'another-session', revision: 1 }, kind: 'operation', actor: 'application', scope: {},
+          origin: { rootId: 'another-session' }, occurredAt: now, receivedAt: now, scopeRevision: 1, content: { text: JSON.stringify({ foregroundActive: false, pendingCommand: false, terminalConfirmed: true }), truncated: false } },
+      ] }, RUNTIME_ACCESS);
+    expect(f.service.context({ scope: {} }, owner).understandings).toHaveLength(0);
+    expect(f.service.context({ scope: {} }, owner).pursuits).toHaveLength(0);
+    await f.runtime.tick(true);
+    const first = f.gateway.runs().at(-1)!;
+    const context = JSON.parse(String(first.args.prompt).split('Context/data:\n')[1]).context;
+    expect(context.understandings.map((u: { id: string }) => u.id)).toContain(understanding.id);
+    expect(context.pursuits).toContainEqual(expect.objectContaining({ id: pursuit.id, paused: !completed, ...(completed ? { status: 'done' } : {}) }));
+    expect(context.evidence.map((e: { id: string }) => e.id)).toContain(evidence);
+    f.gateway.finish(first.runId); await f.runtime.tick(true);
+    f.service.forget({ actionKey: 'forget-scoped-history',
+      expectedVisibilityRevision: f.store.read().visibilityRevision, target: { kind: 'evidence', id: evidence } }, owner);
+    f.restart();
+    const current = f.store.read().checkpoints[0];
+    f.service.ingest({ sourceIdentity: 'chat-source', epoch: 'epoch-1', expectedCheckpointRevision: current.revision,
+      nextCursor: '5', scopeRevision: 1, capturedAt: now, coverage: { complete: true }, events: [
+        { id: 'after-forget', eventId: 'after-forget', cursor: '5', object: { kind: 'message', id: 'after-forget', revision: 1 }, kind: 'message', actor: 'user', scope: {},
+          origin: { rootId: 'another-session' }, occurredAt: now, receivedAt: now, scopeRevision: 1, content: { text: 'What history remains available now?', truncated: false } },
+      ] }, RUNTIME_ACCESS);
+    await f.runtime.tick(true);
+    const after = f.gateway.runs().at(-1)!;
+    expect(after.runId).not.toBe(first.runId);
+    const withdrawn = JSON.parse(String(after.args.prompt).split('Context/data:\n')[1]).context;
+    expect(withdrawn.understandings).toHaveLength(0);
+    expect(withdrawn.pursuits).toHaveLength(0);
+    expect(withdrawn.evidence.map((e: { id: string }) => e.id)).not.toContain(evidence);
   } finally { f.cleanup(); }
 });
 

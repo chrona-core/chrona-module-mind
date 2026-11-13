@@ -197,7 +197,7 @@
     },
     {
       "name": "remember",
-      "description": "Record a sourced goal/preference/constraint/habit/environment. input JSON uses actionKey,expectedVisibilityRevision,expectedRevision,id?,kind,value,scope,explicitness,supportingRefs,opposingRefs?. User evidence required for explicit.",
+      "description": "Record a sourced goal/preference/constraint/habit/environment. input JSON uses actionKey,expectedVisibilityRevision,expectedRevision,id?,kind,value,scope,explicitness,supportingRefs,opposingRefs?. User evidence required for explicit. scope is {} or an object with only projectId/sessionId string identifiers.",
       "visibility": [
         "owner",
         "modules"
@@ -232,7 +232,7 @@
     },
     {
       "name": "pursue",
-      "description": "Create or merge continuing outcome. input JSON actionKey,expectedVisibilityRevision,expectedRevision,semanticKey,goal,completionCriteria,scope,reason,evidenceRefs,understandingRefs?. Ordinary questions need no pursuit.",
+      "description": "Create or merge continuing outcome. input JSON actionKey,expectedVisibilityRevision,expectedRevision,semanticKey,goal,completionCriteria,scope,reason,evidenceRefs,understandingRefs?. Ordinary questions need no pursuit. scope is {} or an object with only projectId/sessionId string identifiers.",
       "visibility": [
         "owner",
         "modules"
@@ -302,7 +302,7 @@
     },
     {
       "name": "feedback",
-      "description": "Explicit user useful/not-useful/reject/restart feedback; input JSON targetKind,targetId,expectedRevision,expectedVisibilityRevision,value,scope,actionKey,evidenceRefs?. Silence never feedback.",
+      "description": "Explicit user useful/not-useful/reject/restart feedback; input JSON targetKind,targetId,expectedRevision,expectedVisibilityRevision,value,scope,actionKey,evidenceRefs?. Silence never feedback. scope is {} or an object with only projectId/sessionId string identifiers.",
       "visibility": [
         "owner",
         "modules"

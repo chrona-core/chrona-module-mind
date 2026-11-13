@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { admissionPrompt } from './core-admission-prompt';
+import { scopeValid } from './core-service';
 import { CoreExecutionJournal, CoreExecutor, type CoreCall, type Execution } from './core-execution';
 import { canonical, coreDigest, objectRetractionId, sessionRetractionId, type CoreMindStore } from './core-store';
 import type { CoreAccess, CoreState, Pursuit, Scope } from './core-types';
@@ -219,6 +220,8 @@ export class CoreAdmission {
     if(typeof input.actionKey!=='string'||!input.actionKey.trim()||input.actionKey.length>512)throw Error('Stable action key is required');
     const prior=this.requests().find(r=>r.operation===operation&&r.access.subject===access.subject&&r.input.actionKey===input.actionKey);
     if(prior){if((prior.originalInputDigest??prior.candidateDigest)!==coreDigest({operation,input}))throw Error('Same action key cannot change the semantic candidate');return this.receipt(prior);}
+    // Reject malformed scope before spending an independent verifier run; the same validator guards application.
+    if(operation!=='control'||input.scope!==undefined)scopeValid(input.scope);
     const snapshot = material(this.store, operation, input, access);
     const id = randomUUID();
     const request: AdmissionRequest = { id, operation, input, access, createdAt: now,

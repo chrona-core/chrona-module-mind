@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {CoreMindStore} from './core-store';
 import {CoreMindService} from './core-service';
 import {CoreActions} from './core-actions';
-import {CoreRuntime} from './core-runtime';
+import {CoreRuntime,RUNTIME_ACCESS} from './core-runtime';
 import {CoreObservationCoordinator} from './core-observation';
 import type {CoreAccess} from './core-types';
 import type {CoreCall,CoreExecutionJournal,Execution,ToolFact} from './core-execution';
@@ -62,6 +62,25 @@ test('confirmed failed work retries twice at persisted 60s and 5m boundaries, th
   f.advance(1);await f.runtime.tick();expect(f.runs()).toHaveLength(3);
   f.finish('failed');await f.runtime.tick();expect(f.runtime.view().retry[0]).toMatchObject({attempts:3,nextRetryAt:null});
   f.restart();f.advance(86400000);await f.runtime.tick(true);expect(f.runs()).toHaveLength(3);
+ }finally{f.close();}
+});
+
+for(const hold of ['none','pause','forget','unknown-effect'] as const)test(`unrelated source supersession permits bounded fresh continuation only after safe stop: ${hold}`,async()=>{
+ const f=new Fixture();try{
+  f.goal();await f.runtime.tick();const original=f.runs()[0];
+  for(const revision of [1,2])f.service.ingest({sourceIdentity:'other-chat',epoch:'one',expectedCheckpointRevision:revision-1,nextCursor:String(revision),scopeRevision:1,capturedAt:f.now,coverage:{complete:true},events:[{id:`execution-${revision}`,eventId:`execution-${revision}`,cursor:String(revision),object:{kind:'execution',id:'other-chat',revision},kind:'operation',actor:'application',scope:{sessionId:'other-chat'},origin:{rootId:'other-chat'},occurredAt:f.now,receivedAt:f.now,scopeRevision:1,content:{text:JSON.stringify({foregroundActive:revision===1,pendingCommand:false,terminalConfirmed:revision===2}),truncated:false}}]},RUNTIME_ACCESS);
+  if(hold==='pause')f.control('pause');
+  if(hold==='forget')f.service.forget({actionKey:'forget-goal-source',expectedVisibilityRevision:f.store.read().visibilityRevision,target:{kind:'evidence',id:f.pursuit.evidenceRefs[0]}},owner);
+  await f.runtime.tick();expect(f.runtime.journal.outstanding()?.stopRequested).toBe(true);expect(f.runtime.journal.outstanding()?.stopConfirmed).toBe(false);
+  f.restart();f.advance(60000);await f.runtime.tick();expect(f.runs()).toHaveLength(1);
+  f.finish('cancelled');
+  if(hold==='unknown-effect'){const run=f.runs()[0];run.items=[{kind:'tool-result',payload:{type:'tool-result',value:{...identity,runId:run.runId,callId:'uncertain',target:{moduleId:identity.moduleId,tool:'detail'},status:'unknown',outputState:'pending'}}}];f.save(run);}
+  await f.runtime.tick();expect(f.runs()).toHaveLength(1);
+  f.restart();f.advance(59999);await f.runtime.tick();expect(f.runs()).toHaveLength(1);
+  f.advance(1);await f.runtime.tick();expect(f.runs()).toHaveLength(hold==='none'?2:1);
+  if(hold==='none'){expect(String(f.runs()[1].args.prompt)).toContain(`\"expectedVisibilityRevision\":${f.store.read().visibilityRevision}`);f.finish('failed');await f.runtime.tick();f.advance(300000);await f.runtime.tick();expect(f.runs()).toHaveLength(3);f.finish('failed');await f.runtime.tick();f.advance(86400000);f.restart();await f.runtime.tick();expect(f.runs()).toHaveLength(3);}
+  else expect(f.pursuit.status).not.toBe('done');
+  expect(f.runs()[0].runId).toBe(original.runId);
  }finally{f.close();}
 });
 

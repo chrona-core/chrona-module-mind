@@ -7,7 +7,7 @@ export type Target = string | { moduleId: string; tool: string };
 export type CoreCall = (target: Target, args: Record<string, unknown>, options?: { key?: string; expectedTarget?: { moduleId: string; hash?: string } }) => Promise<unknown>;
 export type ToolFact = { runId: string; callId: string; target: Target; moduleId: string; hash: string; status: string; outputState: string; output?: unknown };
 export type Execution = {
- id: string; purpose: 'understand'|'pursuit'|'opportunity'; subject: string; basis?: string; revision: number; visibilityRevision: number;
+ id: string; purpose: 'understand'|'pursuit'|'opportunity'; subject: string; basis?: string; evidenceRefs?: string[]; revision: number; visibilityRevision: number;
  principal?: {moduleId:string;hash:string}; key: string; args: Record<string, unknown>; tools: Target[]; createdAt: string; activityStartedAt: string|null;
  contextId: string|null; runId: string|null; cursor: string|null; status: 'prepared'|'running'|'waiting'|'unknown'|'settling'|'finished'|'failed';
  ended: boolean; active: boolean; terminalStatus?: string; stopRequested: boolean; stopConfirmed: boolean; stopKey: string;
@@ -39,7 +39,7 @@ export class CoreExecutionJournal {
  save(e:Execution) { this.db.query('INSERT INTO executions(id,created_at,json) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(e.id,e.createdAt,JSON.stringify(e)); return structuredClone(e); }
  get(id:string):Execution { const row=this.db.query('SELECT json FROM executions WHERE id=?').get(id) as {json:string}|null; if(!row)throw Error('Execution not found'); return JSON.parse(row.json) as Execution; }
  outstanding() { return this.all().find(e=>!e.settled); }
- prepare(input:{purpose:Execution['purpose'];subject:string;basis?:string;revision:number;visibilityRevision:number;prompt:string;tools:Target[];principal?:{moduleId:string;hash:string}}, now:string, budget=24, opportunityBudget=8) {
+ prepare(input:{purpose:Execution['purpose'];subject:string;basis?:string;evidenceRefs?:string[];revision:number;visibilityRevision:number;prompt:string;tools:Target[];principal?:{moduleId:string;hash:string}}, now:string, budget=24, opportunityBudget=8) {
   return this.db.transaction(()=>{
    if(this.outstanding())throw Error('Previous execution or effect still requires reconciliation');
    const today=this.all().filter(e=>e.createdAt.slice(0,10)===now.slice(0,10));
@@ -47,7 +47,7 @@ export class CoreExecutionJournal {
    if(input.tools.length>100 || new Set(input.tools.map(targetKey)).size!==input.tools.length)throw Error('Invalid selected tools');
    if(input.tools.some(t=>typeof t==='string' && (/^(approvals\.(resolve|request)|secrets\.|settings\.|agent\.(run|native)|modules\.(install|remove|rollback|promote))/.test(t)))) throw Error('Autonomous tool selection includes unrestricted administration');
    const id=randomUUID();
-   return this.save({id,purpose:input.purpose,subject:input.subject,basis:input.basis,revision:input.revision,visibilityRevision:input.visibilityRevision,principal:input.principal,key:`mind:${id}:run`,
+   return this.save({id,purpose:input.purpose,subject:input.subject,basis:input.basis,...(input.evidenceRefs?{evidenceRefs:[...input.evidenceRefs]}:{}),revision:input.revision,visibilityRevision:input.visibilityRevision,principal:input.principal,key:`mind:${id}:run`,
     args:{prompt:input.prompt,content:[],lane:'background',tools:input.tools,kind:'conversation'},tools:structuredClone(input.tools),createdAt:now,activityStartedAt:null,contextId:null,runId:null,cursor:null,status:'prepared',ended:false,active:false,stopRequested:false,stopConfirmed:false,stopKey:`mind:${id}:stop`,error:null,interactions:[],facts:[],summary:'',settled:false});
   }).immediate();
  }
@@ -55,7 +55,7 @@ export class CoreExecutionJournal {
   if(keep(e))continue;
   if(!e.settled&&!e.runId&&e.status!=='prepared'){deferred++;continue;}
   if(!e.settled)e.stopRequested=true;
-  e.args={};e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);e.summary='';e.error=null;this.save(e);
+  e.args={};delete e.evidenceRefs;e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);e.summary='';e.error=null;this.save(e);
  }
   // A pinned reader may retain pre-scrub bytes. Always retry, including when rows are already clean.
   try{const checkpoint=this.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as {busy:number};if(checkpoint.busy)deferred++;}
@@ -121,7 +121,7 @@ export class CoreExecutor {
   if(!e.settled)e.stopRequested=true;
   // Unknown dispatches retain the exact original arguments until their run identity is recovered.
   if(!e.settled&&!e.runId&&e.status!=='prepared')return;
-  e.args={};e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);e.summary='';e.error=null;
+  e.args={};delete e.evidenceRefs;e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);e.summary='';e.error=null;
  }
  private capture(e:Execution,raw:unknown){
   if(!record(raw)||raw.kind!=='tool-result'||!record(raw.payload)||raw.payload.type!=='tool-result'||!record(raw.payload.value))return;
@@ -140,7 +140,7 @@ export class CoreExecutor {
   e=this.refresh(e.id);
   if(e.facts.some(f=>f.status==='unknown')){e.status='unknown';e.error=this.contentCurrent(e)?'Original tool effect remains unknown; no new execution will start':null;this.journal.save(e);return;}
   e.status='settling';this.journal.save(e);
-  await this.hooks.settle(e);e=this.refresh(e.id);e.settled=true;e.status=e.terminalStatus==='finished'&&!e.stopRequested?'finished':'failed';e.args={};e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);this.journal.save(e);
+  await this.hooks.settle(e);e=this.refresh(e.id);e.settled=true;e.status=e.terminalStatus==='finished'&&!e.stopRequested?'finished':'failed';e.args={};delete e.evidenceRefs;e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);this.journal.save(e);
  }
  async stop(){const e=this.journal.outstanding();if(e){e.stopRequested=true;this.journal.save(e);await this.reconcile();}}
 }
