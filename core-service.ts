@@ -451,10 +451,10 @@ export class CoreMindService {
     return this.store.inspect(tx => {
       const limit = this.limit(input.limit), maxBytes = input.maxBytes ?? 16384;
       if (!Number.isSafeInteger(maxBytes) || maxBytes < 512 || maxBytes > 32768) fail("INVALID_INPUT", "Context maxBytes must be 512..32768");
-      const tokens = (input.query ?? "").toLocaleLowerCase().split(/\s+/).filter(Boolean);
+      const query = input.query ?? "";
+      if (typeof query !== "string" || Buffer.byteLength(query) > 8192) fail("INVALID_INPUT", "Context query must be at most 8192 bytes");
       const applies = (item: { scope: Scope }) => readable(access, item.scope) && scopeCovers(item.scope, input.scope);
-      const relevant = (value: string) => !tokens.length || tokens.some(token => value.toLocaleLowerCase().includes(token));
-      return tx.collectContext({ limit, maxBytes, applies, relevant, readable: scope => readable(access, scope) });
+      return tx.collectContext({ limit, maxBytes, query, applies, readable: scope => readable(access, scope) });
     });
   }
   private limit(value = 20) { if (!Number.isSafeInteger(value) || value < 1 || value > 100) fail("INVALID_INPUT", "limit must be 1..100"); return value; }

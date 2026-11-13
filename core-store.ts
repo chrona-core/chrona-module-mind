@@ -34,9 +34,58 @@ type RetractionWork = RetractionOptions & {
   visibilityRevision: number; removed: Set<string>; understandings: Set<string>; pursuits: Set<string>;
 };
 type ContextCollection = {
-  limit: number; maxBytes: number; applies: (item: { scope: Scope }) => boolean;
-  relevant: (value: string) => boolean; readable: (scope: Scope) => boolean;
+  limit: number; maxBytes: number; query: string; applies: (item: { scope: Scope }) => boolean;
+  readable: (scope: Scope) => boolean;
 };
+type ContextCandidate = {
+  kind: "understandings" | "pursuits"; item: Understanding | Pursuit;
+  evidence: CoreRecords["evidence"][]; score: number;
+};
+const contextSegmenter = new Intl.Segmenter("und", { granularity: "word" });
+// Grammatical words must not make an unrelated personal statement look relevant.
+const contextStopWords = new Set("的 了 是 我 你 他 她 它 我们 你们 他们 在 和 与 及 也 都 就 还 请 帮 帮我 为 把 被 让 给 有 这 那 什么 怎么 如何 一下 一个 a an the is are to of for and or i me my you please".split(" "));
+function contextTerms(value: string): Map<string, number> {
+  const terms = new Map<string, number>(), normalized = value.normalize("NFKC").toLowerCase();
+  for (const { segment, isWordLike } of contextSegmenter.segment(normalized)) {
+    if (isWordLike && !contextStopWords.has(segment)) terms.set(`w:${segment}`, 2);
+  }
+  // ICU words plus overlapping characters handle unspaced text and word-boundary changes.
+  for (const run of normalized.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+/gu) ?? []) {
+    const chars = [...run];
+    for (const size of [1, 2, 3]) for (let i = 0; i + size <= chars.length; i++) {
+      const term = chars.slice(i, i + size).join("");
+      if (!contextStopWords.has(term)) terms.set(`c:${term}`, size === 1 ? 0.2 : size / 2);
+    }
+  }
+  return terms;
+}
+function rankContext(query: string, candidates: ContextCandidate[]): void {
+  const terms = contextTerms(query);
+  if (!terms.size) return;
+  // Match original evidence too: a compact understanding/goal may use different wording.
+  // Only eligible evidence reaches here; no persistent index can outlive a withdrawal.
+  const evidenceTerms = new Map<string, Map<string, number>>();
+  const documents = candidates.map(({ item, evidence }) => {
+    const primary = contextTerms("value" in item ? item.value : [item.goal, ...item.completionCriteria, item.nextStep ?? ""].join(" "));
+    const matches = new Map([...primary].filter(([term]) => terms.has(term)));
+    for (const e of evidence) {
+      let source = evidenceTerms.get(e.id);
+      if (!source) {
+        source = new Map([...contextTerms(e.content?.text ?? "")].filter(([term]) => terms.has(term)));
+        evidenceTerms.set(e.id, source);
+      }
+      for (const [term, weight] of source) matches.set(term, Math.max(matches.get(term) ?? 0, weight * 0.65));
+    }
+    return matches;
+  });
+  const frequency = new Map<string, number>();
+  for (const doc of documents) for (const term of doc.keys()) frequency.set(term, (frequency.get(term) ?? 0) + 1);
+  candidates.forEach((candidate, index) => {
+    // Query coverage with inverse document frequency; repeated source words get no extra votes.
+    candidate.score = [...documents[index]!].reduce((sum, [term, weight]) =>
+      sum + weight * Math.log(1 + (candidates.length + 1) / ((frequency.get(term) ?? 0) + 1)), 0);
+  });
+}
 function invalidInput(message: string): never { throw new CoreError("INVALID_INPUT", message); }
 const DAY = 86_400_000;
 
@@ -128,16 +177,27 @@ export class CoreTransaction {
     }
     if (!result.checkpoints.length) result.unknowns.push("no_source_coverage");
   }
-  private addContextRecord(result: ContextResult, kind: "understandings" | "pursuits", item: Understanding | Pursuit,
-    options: ContextCollection): void {
-    if (result.understandings.length + result.pursuits.length >= options.limit) { result.truncated = true; return; }
-    const refs = "supportingRefs" in item ? [...item.supportingRefs, ...item.opposingRefs] : [...item.evidenceRefs,...item.understandingRefs.flatMap(id=>{const u=this.get('understanding',id);return u?[...u.supportingRefs,...u.opposingRefs]:['missing-understanding'];})];
-    const evidence = [...new Set(refs)].flatMap(id => {
-      const e = this.get("evidence", id); return e && !e.retractedAt && !e.expiredAt && options.readable(e.scope) &&
-        (e.sourceIdentity==='owner'||e.sourceIdentity==='mind-owner'||this.list('checkpoint').some(cp=>cp.sourceIdentity===e.sourceIdentity&&cp.epoch===e.epoch&&cp.scopeRevision===e.scopeRevision&&cp.coverage.complete)) ? [e] : [];
+  private contextCandidates(options: ContextCollection): ContextCandidate[] {
+    const evidence = new Map(this.list("evidence").map(e => [e.id, e]));
+    const checkpoints = this.list("checkpoint"), understandings = new Map(this.list("understanding").map(u => [u.id, u]));
+    const items: Array<{ kind: ContextCandidate["kind"]; item: Understanding | Pursuit }> = [
+      ...[...understandings.values()].filter(u => options.applies(u) && u.status !== "retracted").map(item => ({ kind: "understandings" as const, item })),
+      ...this.list("pursuit").filter(p => options.applies(p) && !["done", "ended"].includes(p.status)).map(item => ({ kind: "pursuits" as const, item })),
+    ];
+    return items.flatMap(({ kind, item }) => {
+      const refs = "supportingRefs" in item ? [...item.supportingRefs, ...item.opposingRefs] : [...item.evidenceRefs,
+        ...item.understandingRefs.flatMap(id => { const u = understandings.get(id); return u ? [...u.supportingRefs, ...u.opposingRefs] : ["missing-understanding"]; })];
+      const sources = [...new Set(refs)].map(id => evidence.get(id));
+      // Missing/unreadable evidence or incomplete coverage cannot rank or expose copied prose.
+      const ready = sources.every(e => e && !e.retractedAt && !e.expiredAt && options.readable(e.scope) &&
+        (e.sourceIdentity === "owner" || e.sourceIdentity === "mind-owner" || checkpoints.some(cp =>
+          cp.sourceIdentity === e.sourceIdentity && cp.epoch === e.epoch && cp.scopeRevision === e.scopeRevision && cp.coverage.complete)));
+      return ready ? [{ kind, item, evidence: sources as CoreRecords["evidence"][], score: 0 }] : [];
     });
-    // Missing coverage is an unknown, never a basis for reusing copied understanding.
-    if(evidence.length!==new Set(refs).size)return;
+  }
+  private addContextRecord(result: ContextResult, candidate: ContextCandidate, options: ContextCollection): void {
+    if (result.understandings.length + result.pursuits.length >= options.limit) { result.truncated = true; return; }
+    const { kind, item, evidence } = candidate;
     const next = { ...result, [kind]: [...result[kind], item],
       evidence: [...result.evidence, ...evidence.filter(e => !result.evidence.some(prior => prior.id === e.id))] };
     if (Buffer.byteLength(canonical(next)) > options.maxBytes) { result.truncated = true; return; }
@@ -145,18 +205,19 @@ export class CoreTransaction {
     result.evidence = next.evidence;
   }
   collectContext(options: ContextCollection): ContextResult {
-    const { applies, relevant, limit, maxBytes } = options;
-    const u = this.list("understanding").filter(item => applies(item) && item.status !== "retracted");
-    // Specific exceptions precede broad claims; explicit statements precede inference in one scope.
-    u.sort((a, b) => Object.keys(b.scope).length - Object.keys(a.scope).length ||
-      Number(b.explicitness === "explicit") - Number(a.explicitness === "explicit") || Number(relevant(b.value))-Number(relevant(a.value)) ||
-      b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
-    const p = this.list("pursuit").filter(item => applies(item) && !["done", "ended"].includes(item.status)).sort((a,b)=>Number(relevant(b.goal))-Number(relevant(a.goal))||b.updatedAt.localeCompare(a.updatedAt));
+    const { applies, limit, maxBytes } = options;
+    const candidates = this.contextCandidates(options);
+    rankContext(options.query, candidates);
+    const explicit = (item: Understanding | Pursuit) => "explicitness" in item ? item.explicitness === "explicit" : item.reason === "explicit-goal";
+    // Keep scoped exceptions and explicit corrections ahead of broader/inferred claims.
+    // Rank both kinds together so unrelated preferences cannot fill every pursuit slot.
+    candidates.sort((a, b) => Object.keys(b.item.scope).length - Object.keys(a.item.scope).length ||
+      Number(explicit(b.item)) - Number(explicit(a.item)) || b.score - a.score ||
+      b.item.updatedAt.localeCompare(a.item.updatedAt) || a.item.id.localeCompare(b.item.id));
     const result: ContextResult = { revision: this.meta().revision, visibilityRevision: this.meta().visibilityRevision,
       understandings: [], pursuits: [], evidence: [], feedback: [], checkpoints: [], unknowns: [], truncated: false };
     this.contextCoverage(result);
-    u.forEach(item => this.addContextRecord(result, "understandings", item, options));
-    p.forEach(item => this.addContextRecord(result, "pursuits", item, options));
+    candidates.forEach(candidate => this.addContextRecord(result, candidate, options));
     for (const feedback of this.list("feedback").filter(applies).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit)) {
       if (Buffer.byteLength(canonical({ ...result, feedback: [...result.feedback, feedback] })) > maxBytes) {
         result.truncated = true; break;
