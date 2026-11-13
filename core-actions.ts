@@ -65,9 +65,12 @@ export class CoreActions {
    if(!sameGoal||!pursuit.goal)throw new CoreError('CONFLICT','Application read belongs to a different pursuit goal revision');
    return this.applicationArtifact(receipt);
   }
-  const r=this.db.query('SELECT json FROM documents WHERE ref=?').get(ref) as {json:string}|null;if(!r)throw Error('Document not found');const d=JSON.parse(r.json) as DocumentArtifact;if(digest(d.body)!==d.digest)throw Error('Document digest mismatch');return d;
+  const r=this.db.query('SELECT json FROM documents WHERE ref=?').get(ref) as {json:string}|null;if(!r)throw Error('Document not found');const d=JSON.parse(r.json) as DocumentArtifact;if(digest(d.body)!==d.digest)throw Error('Document digest mismatch');const pursuit=this.service.detail({kind:'pursuit',id:d.pursuitId},access);if(!pursuit.goal)throw new CoreError('CONFLICT','Document pursuit has been withdrawn');return d;
  }
  list(pursuitId:string,access?:CoreAccess){
+  const reader=access??{subject:'mind:artifact-reader',role:'runtime' as const,scopes:[{}]};
+  const pursuit=this.service.detail({kind:'pursuit',id:pursuitId},reader);
+  if(!pursuit.goal)return [];
   const documents=(this.db.query('SELECT json FROM documents').all() as {json:string}[]).map(r=>JSON.parse(r.json) as DocumentArtifact).filter(d=>d.pursuitId===pursuitId);
   const applications=(this.db.query('SELECT ref FROM application_reads WHERE pursuit_id=?').all(pursuitId) as {ref:string}[]).flatMap(r=>{
    try{return [this.read(r.ref,access)];}catch(error){console.error(JSON.stringify({component:'mind',event:'application_artifact_unavailable',ref:r.ref,error:error instanceof Error?error.message:String(error)}));return [];}// Withdrawn/changed-goal receipts are not current visible artifacts.

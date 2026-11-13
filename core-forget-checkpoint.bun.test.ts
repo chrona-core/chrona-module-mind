@@ -51,6 +51,9 @@ test('forgotten document WAL stays deferred across restart until its pinned read
    target: 'document', arguments: {}, document: { title: 'Private document', body: marker } },
   { subject: 'worker', role: 'runtime', scopes: [{}], execution: { actor: 'worker', runRef: 'worker-run' } });
   reader = pin(path, 'documents'); f.forget();
+  // Withdrawal hides derived content before any recovery I/O or artifact deletion.
+  expect(f.actions.list('p', owner)).toEqual([]);
+  expect(() => f.actions.read(document.ref, owner)).toThrow('Document pursuit has been withdrawn');
   expect(f.runtime.cleanupWithdrawn().deferred).toBe(1);
   expect(() => f.actions.read(document.ref)).toThrow('Document not found');
   expect(readFileSync(`${path}-wal`).includes(Buffer.from(marker))).toBe(true);

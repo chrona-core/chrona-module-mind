@@ -129,7 +129,7 @@ on('tool',async event=>{
     if(event.id==='control')await runtime.executor.reconcile();break;
    }
    case 'forget':{
-    const forgotten=service.forget(input(a) as never,who);await runtime.executor.reconcile();const cleanup=runtime.cleanupWithdrawn(),applicationCleanup=cleanup.application;
+    const forgotten=service.forget(input(a) as never,who);runtime.cleanupWithdrawn();await runtime.executor.reconcile();const cleanup=runtime.cleanupWithdrawn(),applicationCleanup=cleanup.application;
     const deferred=cleanup.deferred;
     result={...forgotten,value:{...forgotten.value,cleanup:{...forgotten.value?.cleanup,mind:deferred?'deferred-original-command':applicationCleanup?.checkpoint==='busy'?'deferred-checkpoint':'complete',deferredCommands:deferred,...(applicationCleanup?{application:applicationCleanup}:{}),...(cleanup.delivery?{delivery:cleanup.delivery}:{})}}};break;
    }
