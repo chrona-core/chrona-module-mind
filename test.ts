@@ -116,7 +116,7 @@ try {
   const pureCalls = module.calls.length;
   await denied("updates",{conversationId:"sdk-session"},owner);
   await denied("updates",{conversationId:"sdk-session"},stranger);
-  assert.deepEqual(decode<{items:unknown[]}>(await request("updates",{conversationId:"sdk-session"},{kind:"module",module:"chat",moduleId:ids.chat,hash})).items,[]);
+  assert.deepEqual(decode<{items:unknown[]}>(await request("updates",{conversationId:"sdk-session",epoch,scopeRevision:0},{kind:"module",module:"chat",moduleId:ids.chat,hash})).items,[]);
   const firstContext = await context(); emptyContext(firstContext);
   assert.deepEqual(await context(), firstContext);
   assert.equal(module.calls.length, pureCalls, "Context reads must not fetch feeds or start work");

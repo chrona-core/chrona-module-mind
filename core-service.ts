@@ -471,10 +471,15 @@ export class CoreMindService {
     });
   }
   /** Read-only projection for the actual source application; no new messages or model work. */
-  conversationUpdates(sourceIdentity: string, conversationId: string, access: CoreAccess) {
+  conversationUpdates(sourceIdentity: string, conversationId: string, access: CoreAccess, source: { epoch: unknown; scopeRevision: unknown }) {
     authorized(access); text(sourceIdentity, "source identity", 512); text(conversationId, "conversation identifier", 512);
+    text(source.epoch, "source epoch", 512);
+    if (typeof source.scopeRevision !== "number" || !Number.isSafeInteger(source.scopeRevision) || source.scopeRevision < 0) fail("INVALID_INPUT", "Invalid source scope revision");
     return this.store.inspect(tx => {
       if (tx.settings().restoreBlocked) fail("RESTORE_BLOCKED", "Restored memory is unavailable until owner review");
+      const checkpoint = tx.get("checkpoint", sourceIdentity);
+      // A local checkpoint can still be complete while Chat has already withdrawn and reauthorized.
+      if (!checkpoint?.coverage.complete || checkpoint.epoch !== source.epoch || checkpoint.scopeRevision !== source.scopeRevision) return { items: [] };
       const pursuits = tx.visiblePursuits({ limit: 8,
         readable: scope => readable(access, scope),
         applies: item => readable(access, item.scope) && "evidenceRefs" in item && (item as Pursuit).evidenceRefs.some(id => {

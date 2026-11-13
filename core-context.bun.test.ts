@@ -61,14 +61,15 @@ test("original conversation sees its durable blocker without Notify, unrelated g
   const root = service.detail({kind:"evidence",id:first.evidenceRefs[0]!},owner).origin.rootId;
   store.update(tx => { const p = tx.get("pursuit",first.id)!; p.status="waiting"; p.waitReason="公开接口缺少精确 Git 版本材料交接"; p.nextStep="由当前任务负责人补齐接口后继续"; tx.put("pursuit",p); });
   expect(store.read().settings.notifyEnabled).toBe(false);
-  const result = service.conversationUpdates("chat",root,owner);
+  const result = service.conversationUpdates("chat",root,owner,{epoch:"one",scopeRevision:1});
   expect(result.items).toHaveLength(1);
   expect(result.items[0]).toMatchObject({id:first.id,status:"waiting",waitReason:"公开接口缺少精确 Git 版本材料交接",nextStep:"由当前任务负责人补齐接口后继续"});
   expect(JSON.stringify(result)).not.toContain("unrelated-private-marker");
-  expect(service.conversationUpdates("other-chat",root,owner).items).toEqual([]);
-  expect(service.conversationUpdates("chat","another-root",owner).items).toEqual([]);
+  expect(service.conversationUpdates("chat",root,owner,{epoch:"restored",scopeRevision:1}).items).toEqual([]);
+  expect(service.conversationUpdates("other-chat",root,owner,{epoch:"one",scopeRevision:1}).items).toEqual([]);
+  expect(service.conversationUpdates("chat","another-root",owner,{epoch:"one",scopeRevision:1}).items).toEqual([]);
   service.forget({actionKey:"withdraw-original",expectedVisibilityRevision:visibility(),target:{kind:"evidence",id:first.evidenceRefs[0]!}},owner);
-  expect(service.conversationUpdates("chat",root,owner).items).toEqual([]);
+  expect(service.conversationUpdates("chat",root,owner,{epoch:"one",scopeRevision:1}).items).toEqual([]);
 });
 
 describe("bounded local Mind context recall", () => {

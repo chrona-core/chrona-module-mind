@@ -111,7 +111,7 @@ on('tool',async event=>{
    case 'context':result=service.context(contextInput(a),who);break;
    case 'updates':{
     if(event.caller?.kind!=='module'||event.caller.moduleId!==chrona.dependencies['chat'])throw new ModelError('forbidden','Only the bound Chat application may read its conversation updates');
-    result=service.conversationUpdates(event.caller.moduleId,String(a.conversationId??''),who);break;
+    result=service.conversationUpdates(event.caller.moduleId,String(a.conversationId??''),who,{epoch:a.epoch,scopeRevision:a.scopeRevision});break;
    }
    case 'overview':{
     const overview=service.overview({limit:typeof a.limit==='number'?a.limit:50,...(typeof a.after==='string'?{after:a.after}:{})},who);

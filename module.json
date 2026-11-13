@@ -59,7 +59,7 @@
       "description": "Read current Mind outcomes and blockers for an original conversation. Only the bound Chat application may query its own source roots; no execution or external notification.",
       "visibility": ["modules"],
       "idempotent": true,
-      "parameters": {"type":"object","properties":{"conversationId":{"type":"string"}},"required":["conversationId"]},
+      "parameters": {"type":"object","properties":{"conversationId":{"type":"string"},"epoch":{"type":"string"},"scopeRevision":{"type":"number"}},"required":["conversationId","epoch","scopeRevision"]},
       "output": {"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}
     },
     {
