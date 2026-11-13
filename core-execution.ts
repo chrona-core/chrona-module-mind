@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 export type Target = string | { moduleId: string; tool: string };
-export type CoreCall = (target: Target, args: Record<string, unknown>, options?: { key?: string }) => Promise<unknown>;
+export type CoreCall = (target: Target, args: Record<string, unknown>, options?: { key?: string; expectedTarget?: { moduleId: string; hash?: string } }) => Promise<unknown>;
 export type ToolFact = { runId: string; callId: string; target: Target; moduleId: string; hash: string; status: string; outputState: string; output?: unknown };
 export type Execution = {
  id: string; purpose: 'understand'|'pursuit'|'opportunity'; subject: string; basis?: string; revision: number; visibilityRevision: number;
@@ -123,8 +123,11 @@ export class CoreExecutor {
   if(!record(raw)||raw.kind!=='tool-result'||!record(raw.payload)||raw.payload.type!=='tool-result'||!record(raw.payload.value))return;
   const v=raw.payload.value;
   if(v.runId!==e.runId||typeof v.callId!=='string'||typeof v.moduleId!=='string'||typeof v.hash!=='string'||typeof v.status!=='string'||typeof v.outputState!=='string')return;
-  if(e.principal&&(v.moduleId!==e.principal.moduleId||v.hash!==e.principal.hash))return;
   const t=v.target;if(!(typeof t==='string'||record(t)&&typeof t.moduleId==='string'&&typeof t.tool==='string'))return;
+  // Kernel result identity is the called target. Run ownership is authenticated by agent.read.
+  if(typeof t!=='string'&&t.moduleId!==v.moduleId)return;
+  if(typeof t==='string'&&v.moduleId.startsWith('system:')&&v.moduleId!==`system:${t.split('.')[0]}`)return;
+  if(e.principal&&v.moduleId===e.principal.moduleId&&v.hash!==e.principal.hash)return;
   if(!e.tools.some(selected=>targetKey(selected)===targetKey(t as Target)))return;
   const fact={runId:e.runId!,callId:v.callId,target:t as Target,moduleId:v.moduleId,hash:v.hash,status:v.status,outputState:v.outputState,...(v.outputState==='complete'&&this.contentCurrent(e)?{output:v.output}:{})};
   const at=e.facts.findIndex(f=>f.callId===fact.callId);if(at<0)e.facts.push(fact);else e.facts[at]=fact;

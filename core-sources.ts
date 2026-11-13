@@ -105,7 +105,7 @@ export class CoreSources {
     let identity: string | undefined;
     let bytes = 0;
     let rebuilding = false;
-    const checkpoint = () => this.store.read().checkpoints.find(cp => cp.sourceIdentity === identity);
+    const checkpoint = (sourceIdentity = identity) => this.store.read().checkpoints.find(cp => cp.sourceIdentity === sourceIdentity);
     const guard = () => {
       const state = this.store.read();
       if (state.settings.restoreBlocked !== false) fail("RESTORE_BLOCKED");
@@ -142,23 +142,37 @@ export class CoreSources {
     const verify = (source: z.infer<typeof sourceSchema>) => {
       if (source.moduleId !== result.source!.moduleId || source.hash !== result.source!.hash) fail("source_identity_mismatch");
     };
-    const ingest = async (batch: Omit<IngestBatch, "sourceIdentity" | "expectedCheckpointRevision">, expected = checkpoint()) => {
+    const ingest = async (batch: Omit<IngestBatch, "sourceIdentity" | "expectedCheckpointRevision">, expected = checkpoint(), sourceIdentity = identity!) => {
       guard();
       await this.service.ingest({ ...batch, identityContinuityVerified: result.source?.identityContinuityVerified === true,
-        sourceIdentity: identity!, expectedCheckpointRevision: expected?.revision ?? 0 }, ACCESS);
-      const saved = checkpoint();
+        sourceIdentity, expectedCheckpointRevision: expected?.revision ?? 0 }, ACCESS);
+      const saved = checkpoint(sourceIdentity);
       // Chain only our own transaction revision. Never adopt a competing writer after an await.
       if (!saved || saved.revision !== (expected?.revision ?? 0) + 1 || saved.epoch !== batch.epoch || saved.cursor !== batch.nextCursor) fail("CONFLICT");
       result.ingested += batch.events.length;
       result.checkpoint = saved; result.coverage = saved.coverage;
       return saved;
     };
-    const invalidate = async (reason: string) => {
-      const cp = checkpoint();
+    const invalidate = async (reason: string, sourceIdentity = identity) => {
+      const cp = checkpoint(sourceIdentity);
       if (!cp || (!cp.coverage.complete && cp.coverage.gap === reason)) return;
       // Service reads/derived evidence must fail closed while this source is incomplete.
       await ingest({ epoch: cp.epoch, nextCursor: cp.cursor, scopeRevision: cp.scopeRevision,
-        capturedAt: new Date().toISOString(), coverage: { ...cp.coverage, complete: false, gap: reason }, events: [] }, cp);
+        capturedAt: new Date().toISOString(), coverage: { ...cp.coverage, complete: false, gap: reason }, events: [] }, cp, cp.sourceIdentity);
+    };
+    const invalidateKnownChatCoverage = async (): Promise<boolean> => {
+      // A missing resolver result cannot identify arbitrary checkpoint owners. The marker was
+      // stamped only after Chat identity verification and is retained in persisted evidence.
+      const chatIdentities = new Set(this.store.read().evidence.filter(isChatEvidence).map(evidence => evidence.sourceIdentity));
+      let invalidated = true;
+      for (const sourceIdentity of chatIdentities) {
+        try { await invalidate("source_unavailable", sourceIdentity); }
+        catch {
+          console.error("[mind.core-sources]", { code: "coverage_invalidation_failed" });
+          invalidated = false;
+        }
+      }
+      return invalidated;
     };
     const permittedScope = (): EvidenceScope => ({ ...(result.source?.scope ?? {}) });
     const convert = (event: Event): IngestBatch["events"][number] => {
@@ -295,8 +309,10 @@ export class CoreSources {
     };
     try {
       guard();
-      const source = await this.resolveSource("chat");
-      if (!source || !source.moduleId || !source.hash) { result.status = "unavailable"; result.unknowns = ["source_unavailable"]; return result; }
+      let source: ChatSource | undefined;
+      try { source = await this.resolveSource("chat"); }
+      catch { fail("source_unavailable"); }
+      if (!source || !source.moduleId || !source.hash) fail("source_unavailable");
       result.source = source;
       // Keep identity stable across application upgrades and data epochs for object tombstones.
       identity = source.moduleId;
@@ -370,9 +386,12 @@ export class CoreSources {
       const code = error instanceof SourceFailure ? error.code : SAFE_CODES.has(externalCode) ? externalCode : "source_sync_failed";
       // No exception message, arguments, user content, or source-owned error text is logged.
       console.error("[mind.core-sources]", { code });
-      result.status = code === "RESTORE_BLOCKED" ? "blocked" : code === "learning_paused" ? "paused" : code === "source_call_failed" || code === "FORBIDDEN" ? "unavailable" : "degraded";
+      result.status = code === "RESTORE_BLOCKED" ? "blocked" : code === "learning_paused" ? "paused" : code === "source_call_failed" || code === "source_unavailable" || code === "FORBIDDEN" ? "unavailable" : "degraded";
       result.unknowns = [code]; result.coverage = { complete: false, gap: code };
-      if (identity && code !== "RESTORE_BLOCKED" && code !== "learning_paused" && code !== "CONFLICT") {
+      if (code === "source_unavailable" && !identity) {
+        if (!await invalidateKnownChatCoverage()) result.unknowns.push("coverage_invalidation_failed");
+        result.coverage = { complete: false, gap: code };
+      } else if (identity && code !== "RESTORE_BLOCKED" && code !== "learning_paused" && code !== "CONFLICT") {
         try { await invalidate(rebuilding ? "source_rebuilding" : code); }
         catch { console.error("[mind.core-sources]", { code: "coverage_invalidation_failed" }); result.unknowns.push("coverage_invalidation_failed"); }
       }

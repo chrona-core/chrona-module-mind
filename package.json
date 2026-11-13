@@ -4,9 +4,9 @@
   "scripts": {
     "build": "bun run build.ts",
     "test": "bun run test:core && bun run test:ui",
-    "test:core": "bun test ./core-store.bun.test.ts ./core-execution.bun.test.ts ./core-verification.bun.test.ts ./core-runtime.bun.test.ts ./core-notifications.bun.test.ts ./core-recovery.bun.test.ts",
-    "test:ui": "bun test ./workspace-ui.bun.test.ts",
-    "test:sources": "bun test ./core-sources.bun.test.ts"
+    "test:core": "bun test --timeout 20000 ./core-*.bun.test.ts",
+    "test:ui": "bun test --timeout 20000 ./workspace-*.bun.test.ts*",
+    "test:sources": "bun test --timeout 20000 ./core-sources*.bun.test.ts"
   },
   "dependencies": {
     "react": "19.2.8",

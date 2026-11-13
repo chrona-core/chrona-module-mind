@@ -6,7 +6,7 @@ import { CoreMindStore, evidenceId, objectRetractionId } from "./core-store";
 import { CoreMindService } from "./core-service";
 import { Database } from "bun:sqlite";
 import { Observations } from "../chat/observations";
-import { CoreSources, type SourceCall, type SourceIngestor } from "./core-sources";
+import { CoreSources, type ResolveSource, type SourceCall, type SourceIngestor } from "./core-sources";
 import type { CoreAccess, IngestBatch } from "./core-types";
 
 const now = "2026-11-13T12:00:00.000Z";
@@ -317,6 +317,112 @@ describe("CoreSources pure Chat incremental synchronization", () => {
       expect(store.read().evidence.some(e => e.content?.text?.includes("concise"))).toBe(false);
       expect(service.context({ scope: { sessionId: "new-conversation" } }, owner).understandings).toHaveLength(0);
     } finally { db.close(); }
+  });
+
+  test.each(["missing", "invalid", "throws", "rejects"] as const)("persisted real Chat coverage fails closed when resolution %s, then rebuilds authorized context and work", async failure => {
+    const db = new Database(":memory:");
+    try {
+      db.run("CREATE TABLE conversations(id TEXT PRIMARY KEY)"); db.run("INSERT INTO conversations VALUES ('conversation')");
+      const chat = new Observations(db, () => identity);
+      const historical = { id: "conversation", messages: [{ id: "history", role: "user", at: now, text: "Before learning was enabled" }], operations: [] };
+      chat.saved({ ...historical, messages: [] }, historical);
+      chat.scopeTool({ expectedRevision: 0, enabled: true });
+      chat.saved(historical, { ...historical, messages: [...historical.messages,
+        { id: "live", role: "user", at: now, text: "Please organize the project notes" },
+        { id: "forgotten", role: "user", at: now, text: "Forget this old preference" },
+      ] });
+      const t = transport((tool, args) => tool === "observation-scope" ? chat.scopeTool(args)
+        : tool === "observation-inventory" ? chat.inventory(args) : tool === "snapshot" ? chat.snapshot(args) : chat.observations(args));
+      const approved = { ...identity, scope: { projectId: "project-a" } };
+      expect((await new CoreSources(store, service, t.call, () => approved).sync()).status).toBe("synced");
+      expect(t.calls.some(c => c.tool === "observation-inventory")).toBe(false);
+      const evidence = store.read().evidence.find(e => e.object.id === JSON.stringify(["conversation", "live"]))!;
+      const forgotten = store.read().evidence.find(e => e.object.id === JSON.stringify(["conversation", "forgotten"]))!;
+      expect(evidence.scope).toEqual(approved.scope);
+      expect(store.read().evidence.some(e => e.content?.text?.includes("Before learning"))).toBe(false);
+      const owner: CoreAccess = { subject: "owner", role: "owner", scopes: [{}] };
+      const visibility = () => store.read().visibilityRevision;
+      const remembered = service.remember({ actionKey: "remember-live", expectedVisibilityRevision: visibility(), expectedRevision: 0,
+        kind: "goal", value: "Organize project notes", scope: approved.scope, explicitness: "explicit", supportingRefs: [evidence.id] }, owner).value!;
+      const pursuit = service.pursue({ actionKey: "pursue-live", expectedVisibilityRevision: visibility(), expectedRevision: 0,
+        semanticKey: "organize-notes", goal: "Organize project notes", completionCriteria: ["Notes are organized"], scope: approved.scope,
+        reason: "explicit-goal", evidenceRefs: [evidence.id], understandingRefs: [remembered.id] }, owner).value!;
+      service.forget({ actionKey: "forget-old", expectedVisibilityRevision: visibility(), target: { kind: "object",
+        sourceIdentity: identity.moduleId, objectKind: forgotten.object.kind, objectId: forgotten.object.id } }, owner);
+      const tombstones = store.read().retractions;
+      const worker: CoreAccess = { ...access, execution: { actor: "notes-worker", runRef: "notes-run" } };
+      const claimed = service.claim({ actionKey: "claim-notes", expectedVisibilityRevision: visibility(), expectedRevision: pursuit.revision,
+        pursuitId: pursuit.id }, worker).value!;
+      const guard = (actionKey: string) => service.guardAction({ actionKey, expectedVisibilityRevision: visibility(),
+        expectedRevision: claimed.revision, pursuitId: pursuit.id, target: "notes:organize", arguments: {} }, worker);
+      expect(() => guard("before-outage")).not.toThrow();
+      expect(service.context({ scope: approved.scope }, owner).understandings.map(u => u.id)).toContain(remembered.id);
+      expect(service.context({ scope: {} }, owner).understandings).toEqual([]);
+
+      // Reopen SQLite and construct a fresh synchronizer: ownership must survive process memory.
+      store.close(); store = new CoreMindStore(directory); service = new CoreMindService(store, { now: () => now });
+      const before = store.read().checkpoints[0]!;
+      const resolve: ResolveSource = () => {
+        if (failure === "throws") throw Error("private resolver failure");
+        if (failure === "rejects") return Promise.reject(Error("private resolver failure"));
+        return failure === "invalid" ? { moduleId: identity.moduleId, hash: "" } : undefined;
+      };
+      const reads = t.calls.length;
+      const unavailable = await new CoreSources(store, service, t.call, resolve).sync();
+      expect(unavailable.status).toBe("unavailable"); expect(unavailable.unknowns).toEqual(["source_unavailable"]);
+      expect(unavailable.coverage).toEqual({ complete: false, gap: "source_unavailable" }); expect(unavailable.source).toBeUndefined();
+      expect(t.calls).toHaveLength(reads);
+      const withdrawn = store.read().checkpoints[0]!;
+      expect(withdrawn.coverage).toEqual({ ...before.coverage, complete: false, gap: "source_unavailable" });
+      expect(withdrawn.cursor).toBe(before.cursor); expect(withdrawn.epoch).toBe(before.epoch);
+      expect(withdrawn.scopeRevision).toBe(before.scopeRevision);
+      const context = service.context({ scope: approved.scope }, owner);
+      expect(context.understandings).toEqual([]); expect(context.pursuits).toEqual([]); expect(context.evidence).toEqual([]);
+      expect(context.unknowns).toContain(`${identity.moduleId}: source_unavailable`);
+      expect(() => guard("during-outage")).toThrow("coverage");
+      expect(store.read().actions.some(a => a.id === "during-outage")).toBe(false);
+      expect(JSON.stringify(errors.mock.calls)).not.toContain("private resolver failure");
+
+      const recovered = await new CoreSources(store, service, t.call, () => approved).sync();
+      expect(recovered.status).toBe("synced"); expect(recovered.rebuilt).toBe(true); expect(recovered.coverage.complete).toBe(true);
+      expect(t.calls.slice(reads).some(c => c.tool === "observation-inventory")).toBe(true);
+      expect(t.calls.slice(reads).filter(c => c.tool === "observation-scope").length).toBeGreaterThanOrEqual(3);
+      const restored = service.context({ scope: approved.scope }, owner);
+      expect(restored.understandings.map(u => u.id)).toContain(remembered.id); expect(restored.pursuits.map(p => p.id)).toContain(pursuit.id);
+      expect(() => guard("after-recovery")).not.toThrow();
+      expect(service.context({ scope: {} }, owner).understandings).toEqual([]);
+      expect(service.context({ scope: { projectId: "project-b" } }, owner).pursuits).toEqual([]);
+      expect(store.read().retractions).toEqual(tombstones);
+      expect(store.read().evidence.find(e => e.id === forgotten.id)?.content).toBeUndefined();
+      expect(store.read().evidence.some(e => e.content?.text?.includes("Before learning"))).toBe(false);
+    } finally { db.close(); }
+  });
+
+  test("missing resolution invalidates every persisted Chat identity, including retracted evidence, without guessing foreign owners", async () => {
+    for (const moduleId of [identity.moduleId, "previous-chat-module"]) {
+      const call: SourceCall = async target => {
+        expect(target.moduleId).toBe(moduleId);
+        return target.tool === "observation-scope" ? scope() : { ...feed([event(1)], "1"), source: { ...source(), moduleId } };
+      };
+      expect((await new CoreSources(store, service, call, () => ({ ...identity, moduleId })).sync()).status).toBe("synced");
+    }
+    // The active payload may be forgotten while its authenticated source marker remains.
+    const owner: CoreAccess = { subject: "owner", role: "owner", scopes: [{}] };
+    const old = store.read().evidence.find(e => e.sourceIdentity === "previous-chat-module")!;
+    service.forget({ actionKey: "forget-old-chat", expectedVisibilityRevision: store.read().visibilityRevision,
+      target: { kind: "evidence", id: old.id } }, owner);
+    for (const sourceIdentity of ["chat", "unrelated-calendar"]) service.ingest({ ...batch([event(1)], "1"), sourceIdentity }, access);
+    const foreign = store.read().checkpoints.filter(cp => ["chat", "unrelated-calendar"].includes(cp.sourceIdentity));
+    let reads = 0;
+    const missing = new CoreSources(store, service, async () => { reads++; throw Error("unexpected source read"); }, () => undefined);
+    expect((await missing.sync()).unknowns).toEqual(["source_unavailable"]);
+    expect(reads).toBe(0);
+    for (const moduleId of [identity.moduleId, "previous-chat-module"]) {
+      expect(store.read().checkpoints.find(cp => cp.sourceIdentity === moduleId)?.coverage).toMatchObject({ complete: false, gap: "source_unavailable" });
+    }
+    expect(store.read().checkpoints.filter(cp => ["chat", "unrelated-calendar"].includes(cp.sourceIdentity))).toEqual(foreign);
+    const withdrawn = store.read().checkpoints;
+    await missing.sync(); expect(store.read().checkpoints).toEqual(withdrawn);
   });
 
   test("real Chat feed and opaque snapshot cursors rebuild long non-ASCII content without calling Chat read", async () => {

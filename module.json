@@ -41,7 +41,11 @@
     "author.list",
     "author.stage",
     "author.receipt",
-    "author.source"
+    "author.source",
+    "mind.applications",
+    "mind.delivery",
+    "author.submit",
+    "pi.models"
   ],
   "data": {
     "schema": 1
@@ -402,7 +406,7 @@
     },
     {
       "name": "action",
-      "description": "Current responsible Mind run only: create actual bounded local document. input JSON target=document,pursuitId,expectedRevision,expectedVisibilityRevision,actionKey,arguments:{},document:{title,body,format}. No arbitrary target forwarding or permission grant.",
+      "description": "Create a version/actor-guarded local document, or invoke an owner-reviewed granted application read with target=application-read, adapterId and params. Both require pursuitId, expectedRevision, expectedVisibilityRevision and actionKey; returned canonical artifact refs may support independent result verification.",
       "visibility": [
         "owner",
         "modules"
@@ -588,6 +592,73 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "applications",
+      "description": "List reviewed exact application read adapters. input JSON operation list (default), or owner-only grant with moduleId, activeHash, tool, effect read, exact params and reviewed description; revoke with adapterId. Autonomous agents cannot grant or revoke. Use mind.action target application-read for a current pursuit and real persisted response.",
+      "visibility": [
+        "owner"
+      ],
+      "idempotent": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "json"
+        ],
+        "additionalProperties": false
+      },
+      "sideEffects": [
+        "Owner may configure or revoke exact reviewed application reads"
+      ]
+    },
+    {
+      "name": "delivery",
+      "description": "Current kernel-bound worker: prepare exact NEW Author material with pursuit/revisions, actionKey, author identity, admissionId, requestKey, items (name, dir, intent, materialDigest), criteria; finish for authenticated proof capture. Actual owner/approved Web only: list (limit,after), detail/submit/reconcile/withdraw/forget (id). Explicit submit verifies original admission and stages; unknown replies query the original receipt. Activation never completes the goal. No JSON owner/access fields.",
+      "visibility": [
+        "owner",
+        "modules"
+      ],
+      "idempotent": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input"
+        ]
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "json"
+        ],
+        "additionalProperties": false
+      },
+      "sideEffects": [
+        "Persists exact private delivery preparation and authenticated stage/admission proof",
+        "Only an explicit actual-owner submit transports the original staged material to Author; reconcile reads its original receipt"
+      ]
     }
   ]
 }

@@ -93,3 +93,50 @@ test('target or evidence changes invalidate a pending request and cleanup report
     expect(f.admission.outstanding()).toBeDefined();
   } finally { f.cleanup(); }
 });
+
+test('lost candidate reply reuses the same identity and unrelated state changes do not revoke its evidence', async () => {
+  const f=fixture();try{
+    const input={actionKey:'lost-reply',expectedVisibilityRevision:0,expectedRevision:0,kind:'preference',value:'A candidate',scope:{},explicitness:'inferred',supportingRefs:['evidence-1']};
+    const first=f.admission.enqueue('remember',input,access,now);
+    expect(f.admission.enqueue('remember',input,access,now).requestId).toBe(first.requestId);
+    expect(()=>f.admission.enqueue('remember',{...input,value:'Changed candidate'},access,now)).toThrow('Same action key');
+    f.store.update(tx=>tx.put('evidence',{...evidence,id:'unrelated',eventId:'unrelated',object:{...evidence.object,id:'unrelated'}}));
+    await f.admission.tick(now);
+    await f.finish(exactVerdict(f.admission,first.requestId));
+    expect(f.admission.view(first.requestId).status).toBe('applied');
+    expect(f.state.apply).toHaveLength(1);
+    expect(f.admission.enqueue('remember',input,access,now).requestId).toBe(first.requestId);
+    expect(f.state.runCalls).toBe(1);
+  }finally{f.cleanup();}
+});
+
+test('oversized combined evidence and candidate are rejected before reserving pending work', () => {
+  const f=fixture();try {
+    f.store.update(tx=>{
+      tx.put('evidence',{...evidence,content:{text:'a'.repeat(12000),truncated:false}});
+      tx.put('evidence',{...evidence,id:'evidence-2',object:{...evidence.object,id:'message-2'},content:{text:'b'.repeat(12000),truncated:false}});
+    });
+    expect(()=>f.admission.enqueue('remember',{actionKey:'oversized',expectedVisibilityRevision:0,expectedRevision:0,kind:'preference',value:'v'.repeat(7900),scope:{},explicitness:'inferred',supportingRefs:['evidence-1','evidence-2']},access,now)).toThrow('prompt exceeds bound');
+    expect(f.admission.pending()).toHaveLength(0);
+    expect(f.state.runCalls).toBe(0);
+  } finally {f.cleanup();}
+});
+
+test('a restored legacy oversized request becomes visibly failed and cannot jam later work',async()=>{
+  const f=fixture();try {
+    f.store.update(tx=>{
+      tx.put('evidence',{...evidence,content:{text:'a'.repeat(12000),truncated:false}});
+      tx.put('evidence',{...evidence,id:'evidence-2',object:{...evidence.object,id:'message-2'},content:{text:'b'.repeat(12000),truncated:false}});
+    });
+    const first=f.admission.enqueue('remember',{actionKey:'legacy-oversized',expectedVisibilityRevision:0,expectedRevision:0,kind:'preference',value:'Short candidate',scope:{},explicitness:'inferred',supportingRefs:['evidence-1','evidence-2']},access,now);
+    const row=f.admission.journal.db.query('SELECT json FROM admission_requests WHERE id=?').get(first.requestId) as {json:string};
+    const legacy=JSON.parse(row.json);legacy.input.value='v'.repeat(7900);
+    f.admission.journal.db.query('UPDATE admission_requests SET json=? WHERE id=?').run(JSON.stringify(legacy),first.requestId);
+    await f.admission.tick(now);
+    expect(f.admission.view(first.requestId).status).toBe('failed');
+    expect(f.admission.view(first.requestId).reason).toContain('prompt exceeds bound');
+    expect(f.admission.pending()).toHaveLength(0);expect(f.state.runCalls).toBe(0);
+    f.admission.enqueue('remember',{actionKey:'later-valid',expectedVisibilityRevision:0,expectedRevision:0,kind:'preference',value:'Short candidate',scope:{},explicitness:'inferred',supportingRefs:['evidence-1']},access,now);
+    await f.admission.tick(now);expect(f.state.runCalls).toBe(1);
+  } finally {f.cleanup();}
+});

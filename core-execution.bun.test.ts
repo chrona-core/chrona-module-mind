@@ -25,3 +25,16 @@ test('daily budget survives restart, unrelated admin targets rejected, queued wa
  const f=fixture();try{let e=f.journal.prepare(input,now,1);e.settled=true;f.journal.save(e);expect(()=>f.journal.prepare(input,now,1)).toThrow('budget');expect(()=>f.journal.prepare({...input,tools:['approvals.resolve']},'2026-11-14T01:00:00Z')).toThrow('administration');
  e=f.journal.prepare(input,'2026-11-14T01:00:00Z');const ex=new CoreExecutor(f.journal,async t=>t==='agent.run'?{runId:'r',contextId:'c',active:true,status:'queued'}:{run:{runId:'r',contextId:'c',active:true,status:'queued'},items:[],ended:false,nextCursor:null,interactions:[]},{current:()=>true,settle:async()=>{}});await ex.reconcile('2026-11-15T01:00:00Z');expect(f.journal.outstanding()?.activityStartedAt).toBeNull();expect(f.journal.outstanding()?.stopRequested).toBe(false);}finally{f.cleanup();}
 });
+test('real called target identities retain selected Author and kernel facts while rejecting wrong run, self hash and target identity',async()=>{
+ const f=fixture();let settled:Execution|undefined;
+ const principal={moduleId:'mind-id',hash:'mind-hash'},author={moduleId:'author-id',hash:'author-hash'};
+ const targets=[{moduleId:author.moduleId,tool:'stage'},'modules.admit',...input.tools];
+ const result=(callId:string,target:typeof targets[number],moduleId:string,hash:string,runId='r')=>({kind:'tool-result',payload:{type:'tool-result',value:{runId,callId,target,moduleId,hash,status:'succeeded',outputState:'complete',output:{receipt:callId}}}});
+ const call:CoreCall=async target=>target==='agent.run'?{runId:'r',contextId:'c',status:'running',active:true}:{run:{runId:'r',contextId:'c',status:'finished',active:false},ended:true,nextCursor:null,interactions:[],items:[
+  result('stage',targets[0]!,author.moduleId,author.hash),result('admission','modules.admit','system:modules','kernel-contract-hash'),
+  result('self',input.tools[0]!,principal.moduleId,principal.hash),result('wrong-run',targets[0]!,author.moduleId,author.hash,'other'),
+  result('wrong-object',targets[0]!,principal.moduleId,principal.hash),result('wrong-system','modules.admit','system:agent','contract'),
+  result('wrong-self-hash',input.tools[0]!,principal.moduleId,'stale'),result('unselected',{moduleId:'other',tool:'read'},'other','hash'),
+ ]};
+ try{f.journal.prepare({...input,tools:targets,principal},now);await new CoreExecutor(f.journal,call,{current:()=>true,settle:async e=>{settled=structuredClone(e);}}).reconcile(now);expect(settled?.facts.map(x=>x.callId)).toEqual(['stage','admission','self']);expect(settled?.principal).toEqual(principal);expect(f.journal.outstanding()).toBeUndefined();}finally{f.cleanup();}
+});

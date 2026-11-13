@@ -573,3 +573,67 @@
   flex:1 1 180px;
   width:100%
 }
+.mind-root .mind-applications {
+  margin:28px 0;
+  min-width:0
+}
+.mind-root .mind-application-target {
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr);
+  gap:7px 14px;
+  margin:16px 0;
+  font-size:13px
+}
+.mind-root .mind-application-target dt {
+  color:var(--mind-muted)
+}
+.mind-root .mind-application-target dd {
+  margin:0;
+  min-width:0;
+  overflow-wrap:anywhere
+}
+.mind-root .mind-application-target pre {
+  margin:0
+}
+.mind-root .mind-application-form,.mind-root .mind-application-review {
+  max-width:760px;
+  min-width:0
+}
+.mind-root .mind-application-form textarea {
+  resize:vertical
+}
+.mind-root .mind-application-review {
+  padding:21px;
+  border:1px solid #bdcfbe;
+  border-radius:12px;
+  background:#fff;
+  overflow-wrap:anywhere
+}
+.mind-root .mind-application-review .mind-actions {
+  margin-top:18px
+}
+@media(max-width:560px) {
+  .mind-root .mind-application-target {
+    grid-template-columns:minmax(0,1fr);
+    gap:3px
+  }
+  .mind-root .mind-application-target dd {
+    margin-bottom:9px
+  }
+}
+
+.mind-deliveries { margin-top: 2rem; min-width: 0; }
+.mind-delivery-review { margin-top: 1rem; padding: 1rem; border: 1px solid var(--mind-border, #d4d8dd); border-radius: 12px; min-width: 0; }
+.mind-delivery-facts { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 3fr); gap: .5rem 1rem; }
+.mind-delivery-facts dt { font-weight: 600; }
+.mind-delivery-facts dd { margin: 0; }
+.mind-deliveries code, .mind-delivery-facts dd, .mind-delivery-material { overflow-wrap: anywhere; word-break: break-word; }
+.mind-delivery-material { padding: .75rem 0; border-top: 1px solid var(--mind-border, #d4d8dd); }
+.mind-delivery-review h5 { font-size: 1rem; margin: 1rem 0 .5rem; }
+.mind-delivery-confirm { padding: 1rem; margin-top: 1rem; background: var(--mind-surface, #f5f7fa); border-radius: 8px; }
+.mind-deliveries [hidden] { display: none; }
+@media (max-width: 600px) {
+    .mind-delivery-facts { grid-template-columns: minmax(0, 1fr); gap: .25rem; }
+    .mind-delivery-facts dd { margin-bottom: .75rem; }
+    .mind-delivery-review, .mind-delivery-confirm { padding: .75rem; }
+}
