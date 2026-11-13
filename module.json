@@ -557,6 +557,37 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "admission-verdict",
+      "description": "独立语义验收 Run 返回与真实来源及候选绑定的判断；普通应用与调用参数不能授予身份。",
+      "visibility": [
+        "owner"
+      ],
+      "idempotent": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input"
+        ]
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "json"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }

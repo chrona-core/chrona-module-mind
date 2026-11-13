@@ -99,19 +99,63 @@ class Harness {
     expect(understand.args.tools as Target[]).toContainEqual({ moduleId: identity.moduleId, tool: 'remember' });
     expect(understand.args.tools as Target[]).not.toContainEqual({ moduleId: identity.moduleId, tool: 'action' });
     const access = this.workerAccess();
-    const remembered = this.service.remember({ actionKey: 'request:preference', expectedRevision: 0, expectedVisibilityRevision: this.store.read().visibilityRevision,
+    expect(access.execution?.runRef).toBe(understand.runId);
+    const remembered = this.runtime.admission.enqueue('remember', { actionKey: 'request:preference', expectedRevision: 0, expectedVisibilityRevision: this.store.read().visibilityRevision,
       kind: 'preference', value: 'Prefers trains', scope, explicitness: 'explicit', supportingRefs: [evidence] }, access);
     this.gateway.result(understand.runId, 'remember', remembered);
-    const pursued = this.service.pursue({ actionKey: 'request:itinerary', expectedRevision: 0, expectedVisibilityRevision: this.store.read().visibilityRevision,
+    // Both candidates cite the original source; pending memory is not an active understanding dependency.
+    const pursued = this.runtime.admission.enqueue('pursue', { actionKey: 'request:itinerary', expectedRevision: 0, expectedVisibilityRevision: this.store.read().visibilityRevision,
       semanticKey: 'train-before-noon', goal: 'Prepare a useful train itinerary arriving before noon', completionCriteria: [criterion], scope,
-      reason: 'explicit-goal', evidenceRefs: [evidence], understandingRefs: [remembered.value!.id] }, access);
+      reason: 'explicit-goal', evidenceRefs: [evidence] }, access);
     this.gateway.result(understand.runId, 'pursue', pursued);
-    expect(this.pursuit.currentActor).toBeUndefined(); expect(this.actions.list(this.pursuit.id)).toEqual([]);
-    expect(() => this.actions.create({ ...this.mutation('pre-claim-document'), target: 'document', arguments: {},
-      document: { title: 'Too early', body } }, access)).toThrow('responsibility');
+    expect(this.store.read().understandings).toEqual([]); expect(this.store.read().pursuits).toEqual([]);
+    await this.runtime.tick(true);
+    expect(this.gateway.runs()).toHaveLength(1); expect(this.runtime.admission.outstanding()).toBeUndefined();
     this.gateway.finish(understand.runId); await this.runtime.tick(true);
-    const worker = this.gateway.runs()[1];
+    const accepted = new Set<string>();
+    const requests = [remembered, pursued];
+    for (let n = 0; n < requests.length; n++) {
+      if (!this.runtime.admission.outstanding()) await this.runtime.tick(true);
+      for (const request of requests.filter(request => !accepted.has(request.requestId)))
+        expect(this.runtime.admission.view(request.requestId).status).toBe('pending');
+      const verifier = this.runtime.admission.outstanding()!;
+      expect(verifier).toBeDefined(); expect(verifier.runId).toBeTruthy();
+      expect(requests.map(request => request.requestId)).toContain(verifier.subject);
+      expect(accepted.has(verifier.subject)).toBe(false);
+      expect(verifier.tools).toEqual([{ moduleId: identity.moduleId, tool: 'admission-verdict' }]);
+      const runs = this.gateway.runs();
+      expect(runs).toHaveLength(2 + n);
+      expect(new Set(runs.map(run => run.runId)).size).toBe(runs.length);
+      expect(new Set(runs.map(run => run.contextId)).size).toBe(runs.length);
+      const request = this.runtime.admission.view(verifier.subject);
+      expect(request.status).toBe('pending');
+      const receipt = this.runtime.admission.verdict({ requestId: request.requestId, candidateDigest: request.candidateDigest,
+        targetDigest: request.targetDigest, sourceDigest: request.sourceDigest, decision: 'accepted',
+        reason: request.operation === 'remember' ? 'The user explicitly asks to remember their preference for trains.'
+          : 'The user requests an itinerary before noon and supplies the 09:00–11:30 timetable.' }, { ...identity, runId: verifier.runId! });
+      this.gateway.result(verifier.runId!, 'admission-verdict', receipt);
+      await this.runtime.tick(true); await this.runtime.tick(true);
+      // A selected accepted result is still pending until its actual verifier is terminal.
+      expect(this.runtime.admission.view(request.requestId).status).toBe('pending');
+      expect(this.store.read().understandings).toHaveLength(accepted.has(remembered.requestId) ? 1 : 0);
+      expect(this.store.read().pursuits).toHaveLength(accepted.has(pursued.requestId) ? 1 : 0);
+      expect(this.pursuit?.currentActor).toBeUndefined();
+      expect(this.store.read().actions).toEqual([]);
+      expect(this.runtime.journal.outstanding()).toBeUndefined();
+      expect(this.gateway.runs()).toHaveLength(2 + n);
+      this.gateway.finish(verifier.runId!); await this.runtime.tick(true);
+      expect(this.runtime.admission.view(request.requestId).status).toBe('applied');
+      accepted.add(request.requestId);
+    }
+    expect(this.runtime.admission.pending()).toEqual([]);
+    expect(requests.map(request => this.runtime.admission.view(request.requestId).status)).toEqual(['applied', 'applied']);
+    const worker = this.gateway.runs()[3];
+    expect(this.gateway.runs()).toHaveLength(4);
     expect(worker).toBeDefined(); expect(this.pursuit.currentActor?.runRef).toBe(worker.runId);
+    expect(new Set(this.gateway.runs().map(run => run.contextId)).size).toBe(4);
+    expect(this.actions.list(this.pursuit.id)).toEqual([]);
+    expect(() => this.actions.create({ ...this.mutation('discovery-run-document'), target: 'document', arguments: {},
+      document: { title: 'Original discovery run', body } }, access)).toThrow('responsibility');
     return { evidence, worker };
   }
   produce(worker: Run): { document: DocumentArtifact; candidate: ProgressCandidate } {
@@ -140,9 +184,9 @@ test('ingested evidence becomes understanding and a pursuit; bound actual work c
     const { document, candidate } = f.produce(worker);
     expect(f.actions.read(document.ref).body).toBe(body);
     await f.runtime.tick(true);
-    expect(f.pursuit.status).toBe('active'); expect(f.runtime.verification.outstanding()).toBeUndefined(); expect(f.gateway.runs()).toHaveLength(2);
+    expect(f.pursuit.status).toBe('active'); expect(f.runtime.verification.outstanding()).toBeUndefined(); expect(f.gateway.runs()).toHaveLength(4);
     f.restart(); await f.runtime.tick(true);
-    expect(f.gateway.runs()).toHaveLength(2); expect(f.pursuit.currentActor?.runRef).toBe(worker.runId);
+    expect(f.gateway.runs()).toHaveLength(4); expect(f.pursuit.currentActor?.runRef).toBe(worker.runId);
     f.gateway.finish(worker.runId); await f.runtime.tick(true);
     const verifier = f.runtime.verification.outstanding()!;
     expect(verifier.runId).not.toBe(worker.runId); expect(verifier.contextId).not.toBe(worker.contextId);
@@ -157,7 +201,7 @@ test('ingested evidence becomes understanding and a pursuit; bound actual work c
     expect(f.runtime.lastError).toBeNull(); expect(f.pursuit.status).toBe('done'); expect(f.pursuit.currentActor).toBeUndefined();
     expect(f.pursuit.artifactRefs).toEqual([document.ref]); expect(f.store.read().candidates[0].state).toBe('applied');
     expect(f.pursuit.verification?.method).toContain(`run=${verifier.runId}`);
-    f.restart(); await f.runtime.tick(true); expect(f.pursuit.status).toBe('done'); expect(f.gateway.runs()).toHaveLength(3);
+    f.restart(); await f.runtime.tick(true); expect(f.pursuit.status).toBe('done'); expect(f.gateway.runs()).toHaveLength(5);
   } finally { f.cleanup(); }
 });
 
@@ -193,10 +237,10 @@ for (const withdrawal of ['pause', 'forget'] as const) test(`${withdrawal} while
     expect(f.gateway.stops).toContain(worker.runId); expect(f.runtime.journal.outstanding()?.stopConfirmed).toBe(false);
     expect(f.pursuit.status).not.toBe('done'); expect(f.pursuit.currentActor?.runRef).toBe(worker.runId);
     expect(() => f.actions.create({ ...f.mutation('late-action'), target: 'document', arguments: {}, document: { title: 'Late', body } }, f.workerAccess())).toThrow();
-    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(2);
+    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(4);
     f.gateway.finish(worker.runId, 'cancelled'); await f.runtime.tick(true);
     expect(f.pursuit.status).not.toBe('done'); expect(f.pursuit.verification).toBeUndefined(); expect(f.runtime.verification.outstanding()).toBeUndefined();
-    expect(f.pursuit.currentActor).toBeUndefined(); expect(f.runtime.journal.outstanding()).toBeUndefined(); expect(f.gateway.runs()).toHaveLength(2);
+    expect(f.pursuit.currentActor).toBeUndefined(); expect(f.runtime.journal.outstanding()).toBeUndefined(); expect(f.gateway.runs()).toHaveLength(4);
     if (withdrawal === 'pause') expect(f.actions.read(document.ref).body).toBe(body);
   } finally { f.cleanup(); }
 });
@@ -207,16 +251,19 @@ test('failed work is recorded as failed and cannot immediately redispatch the sa
     expect(f.runtime.journal.all().find(e => e.runId === worker.runId)?.status).toBe('failed');
     expect(f.pursuit.status).not.toBe('done'); expect(f.pursuit.currentActor).toBeUndefined();
     for (let n = 0; n < 3; n++) await f.runtime.tick(true);
-    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(2); expect(f.runtime.verification.outstanding()).toBeUndefined();
+    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(4); expect(f.runtime.verification.outstanding()).toBeUndefined();
   } finally { f.cleanup(); }
 });
 
 test('incomplete source coverage blocks both understanding and pursuit dispatch until ingestion commits complete coverage', async () => {
   const f = new Harness(); try {
     const evidence = f.ingest('Prepare the train itinerary from 09:00 to 11:30.', true);
-    // An already recorded pursuit must obey a later coverage loss as well as new understanding.
+    // The owner records an existing pursuit; it must obey a later coverage loss as well as new understanding.
     f.service.pursue({ actionKey: 'explicit-source-goal', expectedVisibilityRevision: f.store.read().visibilityRevision, expectedRevision: 0,
-      semanticKey: 'train-before-noon', goal: 'Prepare train itinerary', completionCriteria: [criterion], scope, reason: 'explicit-goal', evidenceRefs: [evidence] }, RUNTIME_ACCESS);
+      semanticKey: 'train-before-noon', goal: 'Prepare train itinerary', completionCriteria: [criterion], scope, reason: 'explicit-goal', evidenceRefs: [evidence] }, owner);
+    expect(f.pursuit.currentActor).toBeUndefined(); expect(f.actions.list(f.pursuit.id)).toEqual([]);
+    expect(() => f.actions.create({ ...f.mutation('pre-claim-document'), target: 'document', arguments: {},
+      document: { title: 'Too early', body } }, f.workerAccess())).toThrow('responsibility');
     f.store.update(tx=>{const cp=tx.list('checkpoint')[0]!;tx.put('checkpoint',{...cp,revision:cp.revision+1,coverage:{complete:false,gap:'retention_gap'}});});
     await f.runtime.tick(true); expect(f.gateway.runs()).toEqual([]);
     f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toEqual([]); expect(f.pursuit.currentActor).toBeUndefined();
@@ -234,7 +281,7 @@ for (const decision of ['needs-work', 'rejected'] as const) test(`independent ${
     f.gateway.result(verifier.runId!, 'verdict', f.verdict(document, candidate, decision));
     f.gateway.finish(verifier.runId!); await f.runtime.tick(true);
     expect(f.pursuit.status).not.toBe('done'); expect(f.runtime.lastError).toBeNull(); expect(f.pursuit.currentActor).toBeUndefined();
-    f.restart(); await f.runtime.tick(true); expect(f.runtime.lastError).toBeNull(); expect(f.gateway.runs()).toHaveLength(3);
+    f.restart(); await f.runtime.tick(true); expect(f.runtime.lastError).toBeNull(); expect(f.gateway.runs()).toHaveLength(5);
   } finally { f.cleanup(); }
 });
 
@@ -268,7 +315,7 @@ for (const missing of ['artifact-read', 'selected-verdict-result'] as const) tes
     expect(f.pursuit.status).not.toBe('done'); expect(f.pursuit.verification).toBeUndefined();
     expect(f.store.read().candidates[0].state).not.toBe('applied');
     expect(f.runtime.lastError).toBeNull(); expect(f.pursuit.currentActor).toBeUndefined();
-    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(3);
+    f.restart(); await f.runtime.tick(true); expect(f.gateway.runs()).toHaveLength(5);
   } finally { f.cleanup(); }
 });
 

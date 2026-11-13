@@ -5,6 +5,8 @@ export interface CoreAccess {
   role: "owner" | "application" | "runtime";
   scopes: Scope[];
   execution?: { actor: string; runRef: string };
+  /** Trusted semantic admission adapter only; never read from tool arguments or Caller JSON. */
+  semanticAdmission?: { digest: string };
 }
 export interface Versioned { id: string; revision: number; createdAt: string; updatedAt: string }
 export interface Suppression { until: string; reason: "rejected" | "repeated-not-useful"; feedbackId: string }

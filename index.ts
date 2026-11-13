@@ -22,7 +22,7 @@ let identity:{moduleId:string;hash:string}|undefined;
 const self=()=>{if(!identity)throw Error('Mind current version is not verified');return identity;};
 const runtime=new CoreRuntime(store,service,rawCall,self,actions);
 const sources=new CoreSources(store,service,rawCall,async()=>{const id=chrona.dependencies['chat'];if(!id)return undefined;const directory=await rawCall('modules.list',{limit:100}) as {items:{id:string;activeHash:string}[]};const row=directory.items.find(m=>m.id===id);return row?.activeHash?{moduleId:id,hash:row.activeHash}:undefined;});
-const TOOLS=['overview','detail','settings','context','remember','pursue','control','feedback','forget','progress','action','artifact','verdict','check','recovery'];
+const TOOLS=['overview','detail','settings','context','remember','pursue','control','feedback','forget','progress','action','artifact','verdict','admission-verdict','check','recovery'];
 const tools=new Set(TOOLS);let pagesReady=false,maintaining=false,backgroundBusy=false,closed=false;
 const log=(event:string,error:unknown)=>console.error(JSON.stringify({component:'mind',event,error:error instanceof Error?error.message.slice(0,500):String(error).slice(0,500)}));
 async function verifyIdentity(){
@@ -53,7 +53,7 @@ async function register(){
    for(const page of [{id:'main',title:'Mind',view:'overview'},{id:'settings',title:'Mind 设置',view:'settings'}])await chrona.call({moduleId:chrona.dependencies['web'],tool:'page-set'},{id:page.id,title:page.title,layout:'workspace',spec:{root:'mind',elements:{mind:{type:component.type,props:{view:page.view},children:[]}}}});
    pagesReady=true;
   }
-  const timer=await chrona.call('timers.list',{});if(!timer.items.some(t=>t.id==='mind-core'))await chrona.call('timers.set',{id:'mind-core',schedule:{kind:'every',milliseconds:60000}});
+  const timer=await chrona.call('timers.list',{}) as {items:{id:string}[]};if(!timer.items.some(t=>t.id==='mind-core'))await chrona.call('timers.set',{id:'mind-core',schedule:{kind:'every',milliseconds:60000}});
  }catch(error){log('registration_failed',error);}finally{maintaining=false;}
 }
 async function background(manual=false){
@@ -83,16 +83,18 @@ on('tool',async event=>{
     if(a.patch===undefined)result=service.settings(undefined,who);
     else {const patch=JSON.parse(String(a.patch)) as unknown;if(!object(patch))throw new ModelError('invalid','Settings patch must be an object');const state=store.read();result=service.settings({expectedRevision:Number(a.revision),expectedVisibilityRevision:state.visibilityRevision,actionKey:`settings:${coreDigest([who.subject,a.revision,patch])}`,patch},who);await runtime.executor.reconcile();}break;
    }
-   case 'remember':result=service.remember(input(a) as never,who);break;
-   case 'pursue':result=service.pursue(input(a) as never,who);break;
-   case 'control':result=service.control(input(a) as never,who);await runtime.executor.reconcile();break;
-   case 'feedback':result=service.feedback(input(a) as never,who);break;
+   case 'remember':case 'pursue':case 'control':case 'feedback':{
+    const mutation=input(a);
+    result=who.role==='owner'?service[event.id](mutation as never,who):runtime.admission.enqueue(event.id,mutation,who);
+    if(event.id==='control')await runtime.executor.reconcile();break;
+   }
    case 'forget':{
     const forgotten=service.forget(input(a) as never,who);await runtime.executor.reconcile();const cleanup=runtime.cleanupWithdrawn();result={...forgotten,value:{...forgotten.value,cleanup:{...forgotten.value?.cleanup,mind:cleanup.deferred?'deferred-original-command':'complete',deferredCommands:cleanup.deferred}}};break;
    }
+   case 'admission-verdict':{if(event.caller?.kind!=='module'||event.caller.moduleId!==self().moduleId||event.caller.hash!==self().hash||!event.call?.executionRunId)throw new ModelError('forbidden','Kernel-bound independent semantic verifier required');result=runtime.admission.verdict(input(a) as never,{...event.caller,runId:event.call.executionRunId});break;}
    case 'verdict':{if(event.caller?.kind!=='module'||event.caller.moduleId!==self().moduleId||event.caller.hash!==self().hash)throw new ModelError('forbidden','Independent verifier identity required');if(!event.call?.executionRunId)throw new ModelError('forbidden','Kernel-bound verifier run required');result=runtime.verdict(input(a) as never,{...event.caller,runId:event.call.executionRunId});break;}
    case 'progress':await runtime.bindResponsibility();result=service.progress(input(a) as never,access(event.caller,event.id,event.call?.executionRunId));break;
-   case 'action':await runtime.bindResponsibility();result=actions.create(input(a) as never,access(event.caller,event.id,event.call?.executionRunId));break;
+   case 'action':{const mutation=input(a);if(typeof mutation.pursuitId==='string'&&runtime.pendingControl(mutation.pursuitId))throw new ModelError('conflict','A pending user control is being checked; guarded effects are held');await runtime.bindResponsibility();result=actions.create(mutation as never,access(event.caller,event.id,event.call?.executionRunId));break;}
    case 'artifact':{
     const document=actions.read(String(a.ref));service.detail({kind:'pursuit',id:document.pursuitId},who);result=document;break;
    }

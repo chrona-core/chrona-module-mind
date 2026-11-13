@@ -2,9 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CoreMindStore, evidenceId } from "./core-store";
+import { CoreMindStore, coreDigest, evidenceId } from "./core-store";
 import { CoreMindService } from "./core-service";
-import type { CoreAccess, Evidence, IngestBatch, Pursuit, Receipt, Scope } from "./core-types";
+import type { CoreAccess, Evidence, IngestBatch, Mutation, Pursuit, Receipt, Scope } from "./core-types";
 
 const owner: CoreAccess = { subject: "owner", role: "owner", scopes: [{}] };
 const runtime: CoreAccess = { subject: "mind-adapter", role: "runtime", scopes: [{}] };
@@ -16,6 +16,10 @@ function setup() {
   const directory = mkdtempSync(join(tmpdir(), "mind-core-test-")), store = new CoreMindStore(directory);
   resources.push({ store, directory });
   return { store, directory, service: new CoreMindService(store, { now: () => now }) };
+}
+/** Unit-fixture trust boundary: setup stands in for an independent admission adapter. */
+function unitTrustedAdmission<T extends Mutation>(operation: string, input: T, access: CoreAccess): CoreAccess {
+  return { ...access, semanticAdmission: { digest: coreDigest({ operation, input }) } };
 }
 function value<T>(receipt: Receipt<T>): T { expect(receipt.outcome).toBe("applied"); return receipt.value!; }
 function event(id: string, scope: Scope = {}, actor: Evidence["actor"] = "user", revision = 1): IngestBatch["events"][number] {
@@ -68,9 +72,11 @@ describe("Mind private core", () => {
   test("explicit user facts, local exceptions and inferred candidates stay scoped; caller payload cannot authorize", () => {
     const { service, store } = setup();
     ingest(service, [event("global"), event("local", { sessionId: "s1" }), event("suggestion", {}, "assistant")]);
-    const remember = (id: string, scope: Scope, explicitness: "explicit" | "inferred", key: string) => service.remember({
-      actionKey: key, expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference", value: key, scope, explicitness,
-      supportingRefs: [evidenceId("chat", "epoch-1", id)] }, runtime);
+    const remember = (id: string, scope: Scope, explicitness: "explicit" | "inferred", key: string) => {
+      const input = { actionKey: key, expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference" as const, value: key, scope, explicitness,
+        supportingRefs: [evidenceId("chat", "epoch-1", id)] };
+      return service.remember(input, unitTrustedAdmission("remember", input, runtime));
+    };
     const global = value(remember("global", {}, "explicit", "local by default"));
     const local = value(remember("local", { sessionId: "s1" }, "explicit", "cloud this time"));
     expect(value(remember("suggestion", {}, "inferred", "possibly cloud" )).status).toBe("candidate");
@@ -85,6 +91,31 @@ describe("Mind private core", () => {
     expect(() => service.detail({ kind: "understanding", id: local.id }, app)).toThrow("scope");
     expect(() => service.settings({ actionKey: "fake-owner", expectedRevision: 0, expectedVisibilityRevision: 0, patch: { enabled: false } }, app)).toThrow("owner");
     expect(store.read().pursuits).toHaveLength(0);
+  });
+
+  test("non-owner remember rejects a missing semantic admission proof", () => {
+    const { service } = setup();
+    const input = { actionKey: "missing-proof", expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference" as const,
+      value: "a preference", scope: {}, explicitness: "explicit" as const, supportingRefs: [] };
+    expect(() => service.remember(input, runtime)).toThrow("grounded independent semantic admission");
+  });
+
+  test("semantic admission rejects a proof for the wrong operation or payload", () => {
+    const { service } = setup();
+    const input = { actionKey: "exact-proof", expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference" as const,
+      value: "the original preference", scope: {}, explicitness: "explicit" as const, supportingRefs: [] };
+    const wrongOperation = { ...runtime, semanticAdmission: { digest: coreDigest({ operation: "pursue", input }) } };
+    const alteredInput = { ...input, value: "a changed preference" };
+    const proofForOriginal = { ...runtime, semanticAdmission: { digest: coreDigest({ operation: "remember", input }) } };
+    expect(() => service.remember(input, wrongOperation)).toThrow("grounded independent semantic admission");
+    expect(() => service.remember(alteredInput, proofForOriginal)).toThrow("grounded independent semantic admission");
+  });
+
+  test("owner direct mutation still works without semantic admission", () => {
+    const { service } = setup();
+    const input = { actionKey: "owner-direct", expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference" as const,
+      value: "owner supplied preference", scope: {}, explicitness: "explicit" as const, supportingRefs: [] };
+    expect(value(service.remember(input, owner)).value).toBe("owner supplied preference");
   });
 
   test("same actionKey same parameters gives original receipt; conflict on changed parameters and stale versions", () => {
@@ -160,15 +191,16 @@ describe("Mind private core", () => {
     ingest(service, [event("secret", { sessionId: "s1" }), event("independent", { sessionId: "s2" })]);
     const refs = [evidenceId("chat", "epoch-1", "secret")];
     const input = { actionKey: "secret-memory", expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference" as const, value: "very private preference", scope: { sessionId: "s1" }, explicitness: "explicit" as const, supportingRefs: refs };
-    const u = value(service.remember(input, runtime));
-    const p = value(service.pursue({ actionKey: "secret-goal", expectedVisibilityRevision: 0, expectedRevision: 0, semanticKey: "very private semantic identity", goal: "very private goal",
-      completionCriteria: ["private result"], scope: { sessionId: "s1" }, reason: "explicit-goal", evidenceRefs: refs, understandingRefs: [u.id] }, runtime));
+    const u = value(service.remember(input, unitTrustedAdmission("remember", input, runtime)));
+    const pursuitInput = { actionKey: "secret-goal", expectedVisibilityRevision: 0, expectedRevision: 0, semanticKey: "very private semantic identity", goal: "very private goal",
+      completionCriteria: ["private result"], scope: { sessionId: "s1" }, reason: "explicit-goal" as const, evidenceRefs: refs, understandingRefs: [u.id] };
+    const p = value(service.pursue(pursuitInput, unitTrustedAdmission("pursue", pursuitInput, runtime)));
     const active = claim(service, p);
     value(service.progress({ actionKey: "secret-result", expectedVisibilityRevision: 0, pursuitId: p.id, expectedRevision: active.revision,
       summary: "private result candidate", artifactRefs: [], originalReceiptRef: "effect-ref", evidenceRefs: refs, desiredStatus: "done" }, execution));
     const forgotten = value(service.forget({ actionKey: "forget-s1", expectedVisibilityRevision: 0, target: { kind: "session", sessionId: "s1" } }, owner));
     expect(forgotten.visibilityRevision).toBe(1);
-    expect(service.remember(input, runtime).outcome).toBe("forgotten");
+    expect(service.remember(input, unitTrustedAdmission("remember", input, runtime)).outcome).toBe("forgotten");
     expect(service.detail({ kind: "pursuit", id: p.id }, owner).currentActor?.stopRequested).toBe(true);
     ingest(service, [event("secret", { sessionId: "s1" }), event("independent-new", { sessionId: "s2" })], "epoch-2", true);
     expect(store.read().evidence.some(e => e.epoch === "epoch-2" && e.scope.sessionId === "s1")).toBe(false);
@@ -185,7 +217,8 @@ describe("Mind private core", () => {
     const { service, store } = setup();
     ingest(service, [event("editable")]);
     const old = evidenceId("chat", "epoch-1", "editable");
-    value(service.remember({ actionKey: "old-memory", expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference", value: "old text interpretation", scope: {}, explicitness: "explicit", supportingRefs: [old] }, runtime));
+    const oldInput = { actionKey: "old-memory", expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference" as const, value: "old text interpretation", scope: {}, explicitness: "explicit" as const, supportingRefs: [old] };
+    value(service.remember(oldInput, unitTrustedAdmission("remember", oldInput, runtime)));
     ingest(service, [{ ...event("edit-2", {}, "user", 2), object: { kind: "message", id: "editable", revision: 2 } }]);
     ingest(service, [{ ...event("edit-3", {}, "user", 3), object: { kind: "message", id: "editable", revision: 3 } }]);
     expect(store.read().evidence.filter(e => !e.retractedAt)).toHaveLength(1);
@@ -198,9 +231,10 @@ describe("Mind private core", () => {
     ingest(service, [event("u1"), event("u2"), { ...event("self", {}, "assistant"), origin: { rootId: "u3", pursuitId: "old-mind-work" } }]);
     const input = { actionKey: "improvement", expectedVisibilityRevision: 0, expectedRevision: 0, semanticKey: "automate", goal: "automate sorting", completionCriteria: ["works"], scope: {}, reason: "improvement" as const,
       evidenceRefs: ["u1", "u2", "self"].map(id => evidenceId("chat", "epoch-1", id)) };
-    expect(() => service.pursue(input, runtime)).toThrow("three independent");
+    expect(() => service.pursue(input, unitTrustedAdmission("pursue", input, runtime))).toThrow("three independent");
     ingest(service, [event("u3")]);
-    const result = value(service.pursue({ ...input, evidenceRefs: ["u1", "u2", "u3"].map(id => evidenceId("chat", "epoch-1", id)) }, runtime));
+    const improvedInput = { ...input, evidenceRefs: ["u1", "u2", "u3"].map(id => evidenceId("chat", "epoch-1", id)) };
+    const result = value(service.pursue(improvedInput, unitTrustedAdmission("pursue", improvedInput, runtime)));
     expect(result.status).toBe("candidate");
     createPursuit(service, "once-explicit");
     expect(store.read().pursuits).toHaveLength(2);
@@ -212,7 +246,8 @@ describe("Mind private core", () => {
     for (let i = 0; i < 300; i++) value(service.feedback({ actionKey: `feedback-${i}`, expectedVisibilityRevision: 0, targetKind: "pursuit", targetId: p.id,
       expectedRevision: p.revision, value: "useful", scope: {} }, owner));
     ingest(service, [event("old"), { ...event("diagnostic"), diagnostic: true }]);
-    const u = value(service.remember({ actionKey: "long-term", expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference", value: "keep result", scope: {}, explicitness: "explicit", supportingRefs: [evidenceId("chat", "epoch-1", "old")] }, runtime));
+    const longTermInput = { actionKey: "long-term", expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference" as const, value: "keep result", scope: {}, explicitness: "explicit" as const, supportingRefs: [evidenceId("chat", "epoch-1", "old")] };
+    const u = value(service.remember(longTermInput, unitTrustedAdmission("remember", longTermInput, runtime)));
     store.update(tx => { const work = tx.get("pursuit", p.id)!; work.artifactRefs = ["permanent-result"]; tx.put("pursuit", work); });
     now = "2026-11-21T12:00:00.000Z";
     expect(service.maintain(runtime).expired).toBe(1);
@@ -293,14 +328,16 @@ describe("Mind private core", () => {
     ingest(service, [event("history")]);
     const input = { actionKey: "historical-memory", expectedVisibilityRevision: 0, expectedRevision: 0, kind: "preference" as const,
       value: "do not retain this preference", scope: {}, explicitness: "explicit" as const, supportingRefs: [evidenceId("chat", "epoch-1", "history")] };
-    const u = value(service.remember(input, runtime));
+    const u = value(service.remember(input, unitTrustedAdmission("remember", input, runtime)));
     service.forget({ actionKey: "forget-memory", expectedVisibilityRevision: 0, target: { kind: "understanding", id: u.id } }, owner);
-    expect(() => service.remember({ ...input, actionKey: "paraphrase", expectedVisibilityRevision: 1, value: "same preference restated" }, runtime)).toThrow("Forgotten understanding");
+    const paraphraseInput = { ...input, actionKey: "paraphrase", expectedVisibilityRevision: 1, value: "same preference restated" };
+    expect(() => service.remember(paraphraseInput, unitTrustedAdmission("remember", paraphraseInput, runtime))).toThrow("Forgotten understanding");
     ingest(service, [event("history")], "epoch-2", true);
     // Epoch transitions deliberately hold coverage incomplete until a consistent rebuild commits.
     ingest(service, [], "epoch-2", true);
-    expect(() => service.remember({ ...input, actionKey: "epoch-paraphrase", expectedVisibilityRevision: 1,
-      supportingRefs: [evidenceId("chat", "epoch-2", "history")] }, runtime)).toThrow("Forgotten understanding");
+    const epochParaphraseInput = { ...input, actionKey: "epoch-paraphrase", expectedVisibilityRevision: 1,
+      supportingRefs: [evidenceId("chat", "epoch-2", "history")] };
+    expect(() => service.remember(epochParaphraseInput, unitTrustedAdmission("remember", epochParaphraseInput, runtime))).toThrow("Forgotten understanding");
     expect(store.read().understandings.filter(item => item.status === "active")).toHaveLength(0);
     const fresh = value(service.remember({ ...input, actionKey: "new-owner-request", expectedVisibilityRevision: 1, supportingRefs: [] }, owner));
     expect(fresh.status).toBe("active");

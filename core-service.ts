@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {redactSensitiveText} from './core-redaction';
 import { CoreMindStore, CoreTransaction, canonical, coreDigest, evidenceId, objectRetractionId, sessionRetractionId } from "./core-store";
+import { isChatEvidence } from "./core-sources";
 import { CoreError, type ActionRecord, type ApplyProgressInput, type ClaimInput, type ContextInput, type ContextResult,
   type ControlInput, type CoreAccess, type CoreRecords, type CoreSettings, type Evidence, type FeedbackInput,
   type ForgetInput, type GuardActionInput, type IngestBatch, type Mutation, type OverviewInput, type OverviewResult,
@@ -47,6 +48,10 @@ export class CoreMindService {
   private mutate<T>(operation: string, input: Mutation, access: CoreAccess, apply: (tx: CoreTransaction, now: string) => T,
     beforeReceipt?: (tx: CoreTransaction) => void): Receipt<T> {
     authorized(access); text(input.actionKey, "actionKey", 512);
+    if (access.role !== 'owner' && ['remember','pursue','control','feedback'].includes(operation)
+      && access.semanticAdmission?.digest !== coreDigest({operation,input})) {
+      fail('FORBIDDEN','A grounded independent semantic admission is required; a live user reference alone does not authorize its claimed meaning');
+    }
     const now = this.now();
     return this.store.update(tx => {
       tx.authorizeValue(input, scope => authorized(access, scope));
@@ -132,7 +137,12 @@ export class CoreMindService {
     context: { access: CoreAccess; now: string }): void {
     const { access, now } = context; this.validateEvent(event, input, access);
     const fenceId=objectRetractionId(input.sourceIdentity,event.object.kind,event.object.id),fence=tx.get('retraction',fenceId);
-    if(event.scope.sessionId&&tx.get('retraction',sessionRetractionId(event.scope.sessionId)))return;
+    // Shared Chat conclusions remain forgettable by their originating conversation.
+    // The verified adapter marker prevents another source sharing the same root ID
+    // from being captured by this session fence.
+    const chatRoot = isChatEvidence(event) ? event.origin.rootId : undefined;
+    if ((event.scope.sessionId && tx.get('retraction', sessionRetractionId(event.scope.sessionId))) ||
+        (chatRoot && tx.get('retraction', sessionRetractionId(chatRoot)))) return;
     if(fence){if(fence.reason==='forgotten'||fence.sourceScopeRevision===undefined||event.scopeRevision<=fence.sourceScopeRevision||event.kind==='retract'||event.kind==='scope-change')return;tx.delete('retraction',fenceId);}
     const eid = evidenceId(input.sourceIdentity, input.epoch, event.id), sourceDigest = coreDigest(event), existing = tx.get("evidence", eid);
     if (existing) { if (existing.sourceDigest !== sourceDigest) fail("CONFLICT", "Source event identity reused with different data"); return; }
@@ -406,7 +416,9 @@ export class CoreMindService {
       else if (target.kind === "understanding") { const u = get(tx, "understanding", target.id); authorized(access, u.scope); understandingIds = [u.id]; }
       else if (target.kind === "session") {
         authorized(access, { sessionId: target.sessionId });
-        refs = tx.list("evidence").filter(e => e.scope.sessionId === target.sessionId).map(e => e.id);
+        refs = tx.list("evidence").filter(e =>
+          e.scope.sessionId === target.sessionId || (isChatEvidence(e) && e.origin.rootId === target.sessionId)
+        ).map(e => e.id);
         tx.put("retraction", { id: sessionRetractionId(target.sessionId), revision: tx.meta().visibilityRevision + 1, at: now, reason: "forgotten" });
       } else {
         this.validateObjectForgetTarget(target);

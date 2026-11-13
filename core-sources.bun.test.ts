@@ -55,7 +55,9 @@ describe("CoreSources pure Chat incremental synchronization", () => {
     };
     return { calls, call };
   }
-  function sync(call: SourceCall, ingestor: SourceIngestor = service) { return new CoreSources(store, ingestor, call, () => identity); }
+  function sync(call: SourceCall, ingestor: SourceIngestor = service, resolve: () => typeof identity = () => identity) {
+    return new CoreSources(store, ingestor, call, resolve);
+  }
 
   test("starts at the declared new-event watermark, drains every feed page, preserves actor/origin and restarts idempotently", async () => {
     const records = Array.from({ length: 19 }, (_, i) => event(i + 11));
@@ -69,10 +71,24 @@ describe("CoreSources pure Chat incremental synchronization", () => {
     const first = await sync(t.call).sync();
     expect(first.status).toBe("synced"); expect(first.ingested).toBe(19); expect(first.rebuilt).toBe(false);
     expect(store.read().checkpoints[0]?.cursor).toBe("29"); expect(store.read().evidence).toHaveLength(19);
-    expect(store.read().evidence[0]?.actor).toBe("user"); expect(store.read().evidence[0]?.scope).toEqual({ sessionId: "conversation" });
+    expect(store.read().evidence[0]?.actor).toBe("user"); expect(store.read().evidence[0]?.scope).toEqual({});
+    expect(store.read().evidence[0]?.origin.rootId).toBe("conversation");
     expect(t.calls.filter(c => c.tool === "observations")[0]?.args.after).toBe("10");
     const replay = await sync(t.call).sync(); expect(replay.status).toBe("synced"); expect(replay.ingested).toBe(0);
     expect(store.read().evidence).toHaveLength(19); expect(t.calls.some(c => c.tool === "snapshot")).toBe(false);
+  });
+
+  test("trusted project scope stays restrictive and cannot be broadened by Chat event data", async () => {
+    const t = transport(tool => tool === "observation-scope" ? scope("0") : feed([{ ...event(11), scope: {} } as any], "11"));
+    const restricted = sync(t.call, service, () => ({ ...identity, scope: { projectId: "project-a" } }));
+    expect((await restricted.sync()).status).toBe("synced");
+    const evidence = store.read().evidence[0]!;
+    expect(evidence.scope).toEqual({ projectId: "project-a" });
+    const owner = { subject: "owner", role: "owner" as const, scopes: [{}] };
+    const remembered = service.remember({ actionKey: "remember-project", expectedVisibilityRevision: store.inspect(tx => tx.meta().visibilityRevision), expectedRevision: 0,
+      kind: "preference", value: "Project preference", scope: { projectId: "project-a" }, explicitness: "explicit", supportingRefs: [evidence.id] }, owner);
+    expect(service.context({ scope: {} }, owner).understandings.some(u => u.id === remembered.value!.id)).toBe(false);
+    expect(service.context({ scope: { projectId: "project-a" } }, owner).understandings.some(u => u.id === remembered.value!.id)).toBe(true);
   });
 
   test("a real SQLite transaction rolls back the entire batch and leaves the cursor when its second event is invalid", async () => {
@@ -265,6 +281,42 @@ describe("CoreSources pure Chat incremental synchronization", () => {
     const t = transport(tool => tool === "observation-scope" ? scope("10") : feed([], "10", true));
     const result = await sync(t.call).sync(); expect(result.unknowns).toContain("non_advancing_feed");
     expect(t.calls.filter(c => c.tool === "observations")).toHaveLength(1); expect(store.read().checkpoints[0]?.cursor).toBe("10");
+  });
+
+  test("actual Chat evidence can support shared memory, then session forget fences old replay", async () => {
+    const db = new Database(":memory:");
+    try {
+      db.run("CREATE TABLE conversations(id TEXT PRIMARY KEY)");
+      db.run("INSERT INTO conversations VALUES ('conversation'), ('new-conversation')");
+      const chat = new Observations(db, () => identity);
+      chat.scopeTool({ expectedRevision: 0, enabled: true });
+      chat.saved({ id: "conversation", messages: [], operations: [] }, {
+        id: "conversation", messages: [{ id: "preference", role: "user", at: now, text: "I prefer concise answers" }], operations: [],
+      });
+      const makeTransport = transport((tool, args) => tool === "observation-scope" ? chat.scopeTool(args)
+        : tool === "observation-inventory" ? chat.inventory(args) : tool === "snapshot" ? chat.snapshot(args) : chat.observations(args));
+      const sources = sync(makeTransport.call);
+      expect((await sources.sync()).status).toBe("synced");
+      const evidence = store.read().evidence.find(e => e.object.kind === "message")!;
+      expect(evidence.scope).toEqual({});
+      const owner = { subject: "owner", role: "owner" as const, scopes: [{}] };
+      const remembered = service.remember({ actionKey: "remember-shared", expectedVisibilityRevision: store.inspect(tx => tx.meta().visibilityRevision), expectedRevision: 0, kind: "preference",
+        value: "The user prefers concise answers", scope: {}, explicitness: "explicit", supportingRefs: [evidence.id] },
+        owner);
+      const recalled = service.context({ scope: { sessionId: "new-conversation" } }, owner);
+      expect(recalled.understandings.some(u => u.id === remembered.value!.id)).toBe(true);
+
+      service.forget({ actionKey: "forget-conversation", expectedVisibilityRevision: recalled.visibilityRevision,
+        target: { kind: "session", sessionId: "conversation" } },
+        { subject: "owner", role: "owner", scopes: [{}] });
+      expect(service.context({ scope: {} }, owner).understandings.some(u => u.id === remembered.value!.id)).toBe(false);
+      store.update(tx => { const cp = tx.list("checkpoint")[0]!; tx.put("checkpoint", { ...cp, revision: cp.revision + 1, coverage: { complete: false, gap: "retention_gap" } }); });
+      const replay = transport((tool, args) => tool === "observation-scope" ? chat.scopeTool(args)
+        : tool === "observation-inventory" ? chat.inventory(args) : tool === "snapshot" ? chat.snapshot(args) : chat.observations(args));
+      expect((await sync(replay.call).sync()).status).toBe("synced");
+      expect(store.read().evidence.some(e => e.content?.text?.includes("concise"))).toBe(false);
+      expect(service.context({ scope: { sessionId: "new-conversation" } }, owner).understandings).toHaveLength(0);
+    } finally { db.close(); }
   });
 
   test("real Chat feed and opaque snapshot cursors rebuild long non-ASCII content without calling Chat read", async () => {

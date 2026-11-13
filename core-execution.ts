@@ -55,7 +55,7 @@ export class CoreExecutionJournal {
   if(keep(e))continue;
   if(!e.settled&&!e.runId&&e.status!=='prepared'){deferred++;continue;}
   if(!e.settled)e.stopRequested=true;
-  if(Object.keys(e.args).length||e.interactions.length||e.facts.some(f=>f.output!==undefined)||e.summary||e.error){e.args={};e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);e.summary='';e.error=null;this.save(e);}
+  e.args={};e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);e.summary='';e.error=null;this.save(e);
  }this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');return {deferred};}
  prune(now:string) { // Keep unresolved identities; finite recovery receipts rather than a lifetime cap.
   const floor=new Date(Date.parse(now)-30*86400000).toISOString();
@@ -70,7 +70,7 @@ export class CoreExecutor {
  async reconcile(now=new Date().toISOString()) {
   if(this.busy)return; this.busy=true;
   try {
-   let e=this.journal.outstanding(); if(!e)return;
+   let e=this.journal.outstanding(); if(!e)return; e=this.refresh(e.id);
    if(e.status==='settling'){await this.settle(e);return;}
    const current=this.hooks.current(e);
    if(!current || e.activityStartedAt && Date.parse(now)-Date.parse(e.activityStartedAt)>(e.purpose==='opportunity'?180000:600000))e.stopRequested=true;
@@ -79,30 +79,45 @@ export class CoreExecutor {
     // Pure prepared commands have no dispatch intent yet and may be cancelled without dispatch.
     if(e.stopRequested && e.status==='prepared'){e.status='failed';e.ended=true;e.active=false;e.stopConfirmed=true;this.journal.save(e);await this.settle(e);return;}
     e.status='unknown';this.journal.save(e); // durable before external call
-    const run=runView(await this.call('agent.run',e.args,{key:e.key}));
-    e.runId=run.runId;e.contextId=run.contextId;e.status='running';e.active=run.active;this.journal.save(e);
+    const receipt=await this.call('agent.run',e.args,{key:e.key});
+    e=this.refresh(e.id);const run=runView(receipt);
+    if(e.runId&&(e.runId!==run.runId||e.contextId!==run.contextId))throw Error('Run receipt identity mismatch');
+    e.runId=run.runId;e.contextId=run.contextId;e.status='running';e.active=run.active;
+    this.scrubStale(e);this.journal.save(e);
    }
-   this.journal.save(e);await this.hooks.admitted?.(e);e=this.journal.get(e.id);
+   this.journal.save(e);if(this.hooks.current(e))await this.hooks.admitted?.(e);e=this.refresh(e.id);
    if(e.stopRequested&&!e.stopConfirmed){
     const stopped=await this.call('agent.stop',{runId:e.runId},{key:e.stopKey});
+    e=this.refresh(e.id);
     const run=runView(stopped);if(run.runId!==e.runId||run.contextId!==e.contextId)throw Error('Stop receipt identity mismatch');
-    e.stopConfirmed=record(stopped)&&stopped.stopConfirmed===true;e.active=run.active;this.journal.save(e);
+    e.stopConfirmed=e.stopConfirmed||record(stopped)&&stopped.stopConfirmed===true;e.active=run.active;this.journal.save(e);
    }
    for(let i=0;i<5;i++){
     const page=await this.call('agent.read',{runId:e.runId,...(e.cursor?{cursor:e.cursor}:{}),limit:100,waitMs:0});
+    e=this.refresh(e.id);
     if(!record(page)||!Array.isArray(page.items)||typeof page.ended!=='boolean'||!(page.nextCursor===null||typeof page.nextCursor==='string'))throw Error('Invalid Agent observation page');
     const run=runView(page.run);if(run.runId!==e.runId||run.contextId!==e.contextId)throw Error('Agent observation identity mismatch');
     if(run.active&&!e.activityStartedAt&&run.status!=='queued')e.activityStartedAt=now;
     for(const item of page.items)this.capture(e,item);
     const next=page.nextCursor as string|null;if(next&&next===e.cursor&&page.items.length)throw Error('Agent observation cursor did not advance');
-    e.cursor=next;e.ended=page.ended;e.active=run.active;if(!run.active)e.terminalStatus=run.status;e.interactions=Array.isArray(page.interactions)?page.interactions:[];
+    e.cursor=next;e.ended=page.ended;e.active=run.active;if(!run.active)e.terminalStatus=run.status;e.interactions=this.contentCurrent(e)&&Array.isArray(page.interactions)?page.interactions:[];
     e.status=run.status==='unknown'?'unknown':run.active?(e.interactions.length?'waiting':'running'):run.status==='finished'?'finished':'failed';e.error=null;
     this.journal.save(e);
     if(page.ended&&!next&&!run.active&&(!e.stopRequested||e.stopConfirmed)){await this.settle(e);return;}
     if(!next)break;
    }
-  } catch(error){const e=this.journal.outstanding();if(e){e.error=errorText(error);if(e.status!=='settling')e.status='unknown';this.journal.save(e);}console.error(JSON.stringify({component:'mind',event:'execution_reconciliation_failed',error:errorText(error)}));}
+  } catch(error){const outstanding=this.journal.outstanding();if(outstanding){const e=this.refresh(outstanding.id);e.error=this.contentCurrent(e)?errorText(error):null;if(e.status!=='settling')e.status='unknown';this.journal.save(e);}console.error(JSON.stringify({component:'mind',event:'execution_reconciliation_failed',error:errorText(error)}));}
   finally{this.busy=false;}
+ }
+ /** Async replies may only update observations on the latest journal row, never restore a pre-withdrawal snapshot. */
+ private refresh(id:string){const e=this.journal.get(id);this.scrubStale(e);return e;}
+ private contentCurrent(e:Execution){return Object.keys(e.args).length>0&&this.hooks.current(e);}
+ private scrubStale(e:Execution){
+  if(this.hooks.current(e)&&Object.keys(e.args).length)return;
+  if(!e.settled)e.stopRequested=true;
+  // Unknown dispatches retain the exact original arguments until their run identity is recovered.
+  if(!e.settled&&!e.runId&&e.status!=='prepared')return;
+  e.args={};e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);e.summary='';e.error=null;
  }
  private capture(e:Execution,raw:unknown){
   if(!record(raw)||raw.kind!=='tool-result'||!record(raw.payload)||raw.payload.type!=='tool-result'||!record(raw.payload.value))return;
@@ -111,13 +126,14 @@ export class CoreExecutor {
   if(e.principal&&(v.moduleId!==e.principal.moduleId||v.hash!==e.principal.hash))return;
   const t=v.target;if(!(typeof t==='string'||record(t)&&typeof t.moduleId==='string'&&typeof t.tool==='string'))return;
   if(!e.tools.some(selected=>targetKey(selected)===targetKey(t as Target)))return;
-  const fact={runId:e.runId!,callId:v.callId,target:t as Target,moduleId:v.moduleId,hash:v.hash,status:v.status,outputState:v.outputState,...(v.outputState==='complete'&&this.hooks.current(e)?{output:v.output}:{})};
+  const fact={runId:e.runId!,callId:v.callId,target:t as Target,moduleId:v.moduleId,hash:v.hash,status:v.status,outputState:v.outputState,...(v.outputState==='complete'&&this.contentCurrent(e)?{output:v.output}:{})};
   const at=e.facts.findIndex(f=>f.callId===fact.callId);if(at<0)e.facts.push(fact);else e.facts[at]=fact;
  }
  private async settle(e:Execution){
-  if(e.facts.some(f=>f.status==='unknown')){e.status='unknown';e.error='Original tool effect remains unknown; no new execution will start';this.journal.save(e);return;}
+  e=this.refresh(e.id);
+  if(e.facts.some(f=>f.status==='unknown')){e.status='unknown';e.error=this.contentCurrent(e)?'Original tool effect remains unknown; no new execution will start':null;this.journal.save(e);return;}
   e.status='settling';this.journal.save(e);
-  await this.hooks.settle(e);e.settled=true;e.status=e.terminalStatus==='finished'&&!e.stopRequested?'finished':'failed';e.args={};e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);this.journal.save(e);
+  await this.hooks.settle(e);e=this.refresh(e.id);e.settled=true;e.status=e.terminalStatus==='finished'&&!e.stopRequested?'finished':'failed';e.args={};e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);this.journal.save(e);
  }
  async stop(){const e=this.journal.outstanding();if(e){e.stopRequested=true;this.journal.save(e);await this.reconcile();}}
 }

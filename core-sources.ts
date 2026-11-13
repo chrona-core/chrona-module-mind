@@ -1,9 +1,11 @@
 import { z } from "zod";
 import { coreDigest, type CoreMindStore } from "./core-store";
-import type { CoreAccess, IngestBatch, SourceCheckpoint } from "./core-types";
+import type { CoreAccess, IngestBatch, Scope as EvidenceScope, SourceCheckpoint } from "./core-types";
 
 export interface ChatSource {
   moduleId: string; hash: string;
+  /** Trusted adapter's permitted learning scope; source JSON cannot grant scope. */
+  scope?: EvidenceScope;
   /** Trusted runtime verified stable IDs/retraction mappings; never copied from source tool JSON. */
   identityContinuityVerified?: boolean;
 }
@@ -24,6 +26,10 @@ const revision = z.number().int().nonnegative();
 const objectRef = z.object({ kind: text.min(1), id: text.min(1), revision });
 const sourceSchema = z.object({ moduleId: text.min(1), hash: text.min(1), epoch: text.min(1) });
 const coverageSchema = z.object({ complete: z.boolean(), oldestAvailableCursor: cursor.optional(), gap: text.optional() });
+/** Persisted provenance stamped after Chat identity verification, never accepted from source JSON. */
+export function isChatEvidence(event: object): boolean {
+  return "sourceKind" in event && event.sourceKind === "chat";
+}
 const eventSchema = z.object({
   id: text.min(1), cursor, object: objectRef,
   kind: z.enum(["message", "operation", "result", "correction", "retract", "scope-change"]),
@@ -154,12 +160,15 @@ export class CoreSources {
       await ingest({ epoch: cp.epoch, nextCursor: cp.cursor, scopeRevision: cp.scopeRevision,
         capturedAt: new Date().toISOString(), coverage: { ...cp.coverage, complete: false, gap: reason }, events: [] }, cp);
     };
+    const permittedScope = (): EvidenceScope => ({ ...(result.source?.scope ?? {}) });
     const convert = (event: Event): IngestBatch["events"][number] => {
       const content = event.content ? { ...event.content, text: event.content.text ?? "", artifactRefs: event.content.artifactRefs ?? [] } : undefined;
       if (content?.text !== undefined) {
         const bounded = boundedText(content.text); content.text = bounded.value; content.truncated ||= bounded.truncated;
       }
-      const converted = { ...event, eventId: event.id, scope: { sessionId: event.origin.rootId }, content };
+      // Chat's opt-in feed already omits private/excluded conversations. Its root is
+      // provenance, while authenticated restrictions bound the model's scope judgment.
+      const converted = { ...event, eventId: event.id, sourceKind: "chat", scope: permittedScope(), content };
       // Decoded UTF-8 size alone misses JSON expansion (e.g. NUL becomes six bytes).
       if (content?.text !== undefined && Buffer.byteLength(JSON.stringify(converted)) > INGEST_BYTES - 2) {
         const original = content.text; let low = 0; let high = Buffer.byteLength(original);
@@ -212,7 +221,7 @@ export class CoreSources {
       const now = new Date().toISOString();
       const eventId = `inventory-retract:${coreDigest([epoch, atCursor, scopeRevision, ref.kind, ref.id])}`;
       return { id: eventId, eventId, cursor: atCursor, object: ref, kind: "retract", actor: "application",
-        scope: { sessionId: rootId }, origin: { rootId }, occurredAt: now, receivedAt: now, scopeRevision };
+        scope: permittedScope(), origin: { rootId }, occurredAt: now, receivedAt: now, scopeRevision };
     };
     const rebuild = async (): Promise<void> => {
       result.rebuilt = true; rebuilding = true;
