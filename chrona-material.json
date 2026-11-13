@@ -6,6 +6,7 @@
     "bun.lock",
     "core-actions.ts",
     "core-capabilities.ts",
+    "core-context.bun.test.ts",
     "core-execution.bun.test.ts",
     "core-execution.ts",
     "core-notifications.bun.test.ts",

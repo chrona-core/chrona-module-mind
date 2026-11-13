@@ -178,7 +178,11 @@ export class CoreTransaction {
     if (!result.checkpoints.length) result.unknowns.push("no_source_coverage");
   }
   private contextCandidates(options: ContextCollection): ContextCandidate[] {
-    const evidence = new Map(this.list("evidence").map(e => [e.id, e]));
+    const evidence = new Map<string, CoreRecords["evidence"] | undefined>();
+    const source = (id: string) => {
+      if (!evidence.has(id)) evidence.set(id, this.get("evidence", id));
+      return evidence.get(id);
+    };
     const checkpoints = this.list("checkpoint"), understandings = new Map(this.list("understanding").map(u => [u.id, u]));
     const items: Array<{ kind: ContextCandidate["kind"]; item: Understanding | Pursuit }> = [
       ...[...understandings.values()].filter(u => options.applies(u) && u.status !== "retracted").map(item => ({ kind: "understandings" as const, item })),
@@ -187,7 +191,7 @@ export class CoreTransaction {
     return items.flatMap(({ kind, item }) => {
       const refs = "supportingRefs" in item ? [...item.supportingRefs, ...item.opposingRefs] : [...item.evidenceRefs,
         ...item.understandingRefs.flatMap(id => { const u = understandings.get(id); return u ? [...u.supportingRefs, ...u.opposingRefs] : ["missing-understanding"]; })];
-      const sources = [...new Set(refs)].map(id => evidence.get(id));
+      const sources = [...new Set(refs)].map(source);
       // Missing/unreadable evidence or incomplete coverage cannot rank or expose copied prose.
       const ready = sources.every(e => e && !e.retractedAt && !e.expiredAt && options.readable(e.scope) &&
         (e.sourceIdentity === "owner" || e.sourceIdentity === "mind-owner" || checkpoints.some(cp =>

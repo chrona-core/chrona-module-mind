@@ -286,7 +286,7 @@ describe("CoreSources pure Chat incremental synchronization", () => {
       });
       const result = await sync(t.call).sync(); expect(result.status).toBe("synced"); expect(result.rebuilt).toBe(true);
       expect(t.calls.filter(c => c.tool === "snapshot").length).toBeGreaterThan(1);
-      const content = store.read().evidence[0]?.content;
+      const content = store.read().evidence.find(e=>e.object.kind==='message')?.content;
       expect(content?.truncated).toBe(true); expect(Buffer.byteLength(content?.text ?? "")).toBeLessThanOrEqual(16384);
       expect(content?.text?.includes("�")).toBe(false); expect(longText.startsWith(content?.text ?? "")).toBe(true);
       expect(store.read().checkpoints[0]?.epoch).toBe(currentScope.epoch);
@@ -305,7 +305,7 @@ describe("CoreSources pure Chat incremental synchronization", () => {
       const t = transport((tool, args) => tool === "observation-scope" ? chat.scopeTool(args)
         : tool === "observation-inventory" ? chat.inventory(args) : tool === "snapshot" ? chat.snapshot(args) : chat.observations(args));
       const sources = sync(t.call); expect((await sources.sync()).status).toBe("synced");
-      const original = store.read().evidence[0]!;
+      const original = store.read().evidence.find(e=>e.object.kind==='message')!;
       expect(original.content?.truncated).toBe(true); expect(text.startsWith(original.content?.text ?? "")).toBe(true);
       expect(Buffer.byteLength(JSON.stringify(original.content))).toBeLessThan(60000);
       store.update(tx => { const cp = tx.list("checkpoint")[0]!; tx.put("checkpoint", { ...cp, revision: cp.revision + 1, coverage: { complete: false, gap: "retention_gap" } }); });

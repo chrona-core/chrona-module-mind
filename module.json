@@ -74,8 +74,7 @@
             "type": "number"
           }
         },
-        "required": [],
-        "additionalProperties": false
+        "required": []
       },
       "output": {
         "type": "object",
@@ -108,8 +107,7 @@
             "type": "string"
           }
         },
-        "required": [],
-        "additionalProperties": false
+        "required": []
       },
       "output": {
         "type": "object",
@@ -142,8 +140,7 @@
         },
         "required": [
           "id"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -176,8 +173,7 @@
             "type": "number"
           }
         },
-        "required": [],
-        "additionalProperties": false
+        "required": []
       },
       "output": {
         "type": "object",
@@ -212,8 +208,7 @@
         },
         "required": [
           "input"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -248,8 +243,7 @@
         },
         "required": [
           "input"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -284,8 +278,7 @@
         },
         "required": [
           "input"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -320,8 +313,7 @@
         },
         "required": [
           "input"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -355,8 +347,7 @@
         },
         "required": [
           "input"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -391,8 +382,7 @@
         },
         "required": [
           "input"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -427,8 +417,7 @@
         },
         "required": [
           "input"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -463,8 +452,7 @@
         },
         "required": [
           "ref"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -490,8 +478,7 @@
       "parameters": {
         "type": "object",
         "properties": {},
-        "required": [],
-        "additionalProperties": false
+        "required": []
       },
       "output": {
         "type": "object",
@@ -525,8 +512,7 @@
         },
         "required": [
           "input"
-        ],
-        "additionalProperties": false
+        ]
       },
       "output": {
         "type": "object",
@@ -554,8 +540,7 @@
           "input": {
             "type": "string"
           }
-        },
-        "additionalProperties": false
+        }
       },
       "sideEffects": [
         "Mind recovery authorization"
