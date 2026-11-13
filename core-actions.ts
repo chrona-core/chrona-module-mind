@@ -83,6 +83,11 @@ export class CoreActions {
   // These rows contain only receipt identities and goal digests. Keep them through
   // temporary source gaps or read failures so repaired coverage restores discovery.
   // Explicitly forgotten pursuits were removed above; the adapter scrubs withdrawn bodies.
-  this.lastApplicationCleanup=applicationCleanup;this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');return applicationCleanup;}
+  this.lastApplicationCleanup=applicationCleanup;
+  // Retry on every maintenance pass, even after all documents have been deleted or after restart.
+  let deferred=0;
+  try{const checkpoint=this.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as {busy:number};if(checkpoint.busy)deferred++;}
+  catch(error){deferred++;console.error(JSON.stringify({component:'mind',event:'artifact_checkpoint_failed',error:error instanceof Error?error.message:String(error)}));}
+  return {deferred,...(applicationCleanup?{application:applicationCleanup}:{})};}
  close(){this.db.close();}
 }

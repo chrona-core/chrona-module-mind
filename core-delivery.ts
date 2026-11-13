@@ -161,7 +161,7 @@ export class CoreDelivery {
     const original=command(r.payload);if(coreDigest(original)!==r.commandDigest)throw Error('Original command changed');
     r.status='submit-unknown';r.observation='original submit outcome unknown; exact receipt query required';this.save(r);return original;
    }).immediate();
-   const raw=await this.call(target(r,'submit'),{input:JSON.stringify(args)},{key:r.requestKey});
+   const raw=await this.call(target(r,'submit'),{input:JSON.stringify(args)},{key:r.requestKey,expectedTarget:{moduleId:r.author.moduleId,hash:r.author.hash}});
    this.accept(this.get(r.id),raw);return this.get(r.id);
   }finally{this.inflight.delete(r.id);}
  }

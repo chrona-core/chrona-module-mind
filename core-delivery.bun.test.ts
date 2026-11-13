@@ -25,7 +25,7 @@ function fixture(){
   calls.push({target,args,key:options?.key});
   if(target==='modules.list')return {items:[{id:author.moduleId,name:'author',status:'active',activeHash:state.authorHash},...(state.active?[{id:'calendar-id',name:'calendar',status:'active',activeHash:'d'.repeat(40)}]:[])],nextCursor:null};
   if(typeof target==='object'&&target.moduleId===author.moduleId&&target.tool==='submit'){
-   state.submits++;expect(parseSubmit(JSON.parse(args.input as string))).toEqual({admissionId:input.admissionId,requestKey:input.requestKey,items:input.items.map(({materialDigest,...item})=>item)});expect(options?.key).toBe(input.requestKey);await state.hold?.();if(state.lost)throw Error('lost reply');return structuredClone(receipt);
+   expect(options?.expectedTarget).toEqual({moduleId:author.moduleId,hash:author.hash});state.submits++;expect(parseSubmit(JSON.parse(args.input as string))).toEqual({admissionId:input.admissionId,requestKey:input.requestKey,items:input.items.map(({materialDigest,...item})=>item)});expect(options?.key).toBe(input.requestKey);await state.hold?.();if(state.lost)throw Error('lost reply');return structuredClone(receipt);
   }
   if(target==='modules.receipt'){const selector='receiptId'in args?{receiptId:args.receiptId}:{admissionId:args.admissionId,requestKey:args.key};parseReceipt(selector);state.receiptQueries.push(selector);return {...structuredClone(receipt),...(state.badReceipt?{receiptId:'other-receipt'}:{})};}
   throw Error('Unexpected bounded call');

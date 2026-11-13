@@ -56,7 +56,11 @@ export class CoreExecutionJournal {
   if(!e.settled&&!e.runId&&e.status!=='prepared'){deferred++;continue;}
   if(!e.settled)e.stopRequested=true;
   e.args={};e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);e.summary='';e.error=null;this.save(e);
- }this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');return {deferred};}
+ }
+  // A pinned reader may retain pre-scrub bytes. Always retry, including when rows are already clean.
+  try{const checkpoint=this.db.query('PRAGMA wal_checkpoint(TRUNCATE)').get() as {busy:number};if(checkpoint.busy)deferred++;}
+  catch(error){deferred++;console.error(JSON.stringify({component:'mind',event:'execution_checkpoint_failed',error:errorText(error)}));}
+  return {deferred};}
  prune(now:string) { // Keep unresolved identities; finite recovery receipts rather than a lifetime cap.
   const floor=new Date(Date.parse(now)-30*86400000).toISOString();
   for(const e of this.all())if(e.settled&&e.createdAt<floor)this.db.query('DELETE FROM executions WHERE id=?').run(e.id);

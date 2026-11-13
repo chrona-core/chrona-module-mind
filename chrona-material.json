@@ -27,6 +27,7 @@
     "core-execution-privacy-race.bun.test.ts",
     "core-execution.bun.test.ts",
     "core-execution.ts",
+    "core-forget-checkpoint.bun.test.ts",
     "core-notifications.bun.test.ts",
     "core-notifications.ts",
     "core-observation.bun.test.ts",

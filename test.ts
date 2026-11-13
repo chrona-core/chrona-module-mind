@@ -145,6 +145,16 @@ try {
   const checked = decode<Health>(await request("check"));
   assert.equal(checked.sourceError, undefined); assert.equal(checked.error, null);
   assert.equal(checked.phase, "idle"); assert.ok(checked.lastCheckAt); assert.equal(checked.budget.starts, 0);
+  // Check returns after reconciliation; source observation and subsequent capability discovery complete independently.
+  const observationComplete = (value: Overview) => value.sources.some(source => source.sourceIdentity === ids.chat && source.coverage.complete)
+    && callsFor("chat.observations").length > 0 && callsFor("modules.describe").length > 0;
+  let observed = await overview();
+  for (let attempt = 0; attempt < 100 && !observationComplete(observed); attempt++) {
+    await new Promise<void>(resolve => setTimeout(resolve, 10));
+    observed = await overview();
+  }
+  assert.ok(observationComplete(observed), `Manual check observation timed out: ${JSON.stringify({ health: observed.health,
+    sources: observed.sources, feedReads: callsFor("chat.observations").length, capabilityReads: callsFor("modules.describe").length })}`);
   assert.ok(callsFor("chat.observations").length > 0, "Manual check reads the real empty feed contract");
   assert.ok(callsFor("modules.describe").length > 0, "Manual check discovers available capabilities");
   for (const call of callsFor("chat.observations")) assert.deepEqual(call.params.target, { moduleId: ids.chat, tool: "observations" });
