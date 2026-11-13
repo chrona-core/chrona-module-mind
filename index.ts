@@ -35,7 +35,7 @@ const proof=new CoreDeliveryAdmission(chrona.paths.data,runtime.journal);
 const delivery:CoreDelivery=new CoreDelivery(chrona.paths.data,service,rawCall,{worker:runRef=>runtime.journal.all().find(e=>e.runId===runRef),verifyAdmission:async r=>proof.verify(r),assertMaySubmit:pursuitId=>{if(runtime.pendingControl(pursuitId))throw new ModelError('conflict','A pending user control holds delivery submission');}});
 const observe:CoreCall=(target,args,options)=>runtime.observe(target,args,options,typeof target==='object'&&target.tool==='observation-scope'?'source-control':'source-data');
 const sources=new CoreSources(store,service,observe,async()=>{const id=chrona.dependencies['chat'];if(!id)return undefined;const rows=await directoryRows((target,args)=>runtime.observe(target,args,undefined,'source-control'));const row=rows.find(m=>m.id===id);return row?.activeHash?{moduleId:id,hash:row.activeHash}:undefined;});
-const TOOLS=['overview','detail','settings','context','remember','pursue','control','feedback','forget','applications','delivery','artifact','check','recovery'];
+const TOOLS=['overview','detail','settings','context','updates','remember','pursue','control','feedback','forget','applications','delivery','artifact','check','recovery'];
 const tools=new Set([...TOOLS,'progress','action','verdict','admission-verdict']);let pagesReady=false,maintaining=false,closed=false;
 const log=(event:string,error:unknown)=>console.error(JSON.stringify({component:'mind',event,error:error instanceof Error?error.message.slice(0,500):String(error).slice(0,500)}));
 async function directoryRows(call:CoreCall){
@@ -106,9 +106,13 @@ on('tool',async event=>{
  try{
   if(!tools.has(event.id))throw new ModelError('invalid','Unknown Mind tool');if(!identity)await verifyIdentity();
   recovery.guard();const a=event.args,who=access(event.caller,event.id,event.call?.executionRunId);let result:unknown;
-  if(store.inspect(tx=>tx.settings().restoreBlocked)&&who.role!=='owner'&&['context','detail','artifact','overview'].includes(event.id))throw new CoreError('RESTORE_BLOCKED','Restored memory is unavailable until owner review');
+  if(store.inspect(tx=>tx.settings().restoreBlocked)&&who.role!=='owner'&&['context','updates','detail','artifact','overview'].includes(event.id))throw new CoreError('RESTORE_BLOCKED','Restored memory is unavailable until owner review');
   switch(event.id){
    case 'context':result=service.context(contextInput(a),who);break;
+   case 'updates':{
+    if(event.caller?.kind!=='module'||event.caller.moduleId!==chrona.dependencies['chat'])throw new ModelError('forbidden','Only the bound Chat application may read its conversation updates');
+    result=service.conversationUpdates(event.caller.moduleId,String(a.conversationId??''),who);break;
+   }
    case 'overview':{
     const overview=service.overview({limit:typeof a.limit==='number'?a.limit:50,...(typeof a.after==='string'?{after:a.after}:{})},who);
     result={...overview,health:runtime.view(),notifications:notifications.view(),budget:runtime.view().budget,sources:store.read().checkpoints,autonomousPublishing:runtime.view().autonomousPublishing,recovery:recovery.status()};break;

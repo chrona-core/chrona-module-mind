@@ -54,6 +54,23 @@ const unrelated = ["编辑器使用深色主题", "旅行优先乘坐高铁", "�
 function distract(remember: ReturnType<typeof setup>["remember"]) { unrelated.forEach(value => remember(value)); }
 function ids(context: ContextResult) { return [...context.understandings, ...context.pursuits].map(item => item.id); }
 
+test("original conversation sees its durable blocker without Notify, unrelated goals or withdrawn evidence", () => {
+  const { service, store, pursue, visibility } = setup();
+  const first = pursue("交付应用中心", "请完成应用中心并给出候选回执" + "x".repeat(16_000));
+  pursue("其他会话的私人目标", "unrelated-private-marker");
+  const root = service.detail({kind:"evidence",id:first.evidenceRefs[0]!},owner).origin.rootId;
+  store.update(tx => { const p = tx.get("pursuit",first.id)!; p.status="waiting"; p.waitReason="公开接口缺少精确 Git 版本材料交接"; p.nextStep="由当前任务负责人补齐接口后继续"; tx.put("pursuit",p); });
+  expect(store.read().settings.notifyEnabled).toBe(false);
+  const result = service.conversationUpdates("chat",root,owner);
+  expect(result.items).toHaveLength(1);
+  expect(result.items[0]).toMatchObject({id:first.id,status:"waiting",waitReason:"公开接口缺少精确 Git 版本材料交接",nextStep:"由当前任务负责人补齐接口后继续"});
+  expect(JSON.stringify(result)).not.toContain("unrelated-private-marker");
+  expect(service.conversationUpdates("other-chat",root,owner).items).toEqual([]);
+  expect(service.conversationUpdates("chat","another-root",owner).items).toEqual([]);
+  service.forget({actionKey:"withdraw-original",expectedVisibilityRevision:visibility(),target:{kind:"evidence",id:first.evidenceRefs[0]!}},owner);
+  expect(service.conversationUpdates("chat",root,owner).items).toEqual([]);
+});
+
 describe("bounded local Mind context recall", () => {
   test("older Chinese dietary preference survives sixteen newer unrelated preferences without a food routing table", () => {
     const { service, remember } = setup();

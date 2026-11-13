@@ -470,6 +470,25 @@ export class CoreMindService {
       return tx.collectContext({ limit, maxBytes, query, applies, readable: scope => readable(access, scope) });
     });
   }
+  /** Read-only projection for the actual source application; no new messages or model work. */
+  conversationUpdates(sourceIdentity: string, conversationId: string, access: CoreAccess) {
+    authorized(access); text(sourceIdentity, "source identity", 512); text(conversationId, "conversation identifier", 512);
+    return this.store.inspect(tx => {
+      if (tx.settings().restoreBlocked) fail("RESTORE_BLOCKED", "Restored memory is unavailable until owner review");
+      const pursuits = tx.visiblePursuits({ limit: 8,
+        readable: scope => readable(access, scope),
+        applies: item => readable(access, item.scope) && "evidenceRefs" in item && (item as Pursuit).evidenceRefs.some(id => {
+          const evidence = tx.get("evidence", id);
+          return evidence?.sourceIdentity === sourceIdentity && evidence.origin.rootId === conversationId;
+        }) });
+      const items = pursuits.map(p => ({ id: p.id, revision: p.revision, status: p.paused ? "paused" : p.status,
+        goal: p.goal.slice(0, 300), waitReason: p.waitReason?.slice(0, 500), nextStep: p.nextStep?.slice(0, 500),
+        artifactRefs: p.artifactRefs.slice(0, 3), updatedAt: p.updatedAt }));
+      // Bound only projected status, not the source text needed for visibility checks.
+      while (Buffer.byteLength(JSON.stringify({ items })) > 16384) items.pop();
+      return { items };
+    });
+  }
   private limit(value = 20) { if (!Number.isSafeInteger(value) || value < 1 || value > 100) fail("INVALID_INPUT", "limit must be 1..100"); return value; }
   overview(input: OverviewInput, access: CoreAccess): OverviewResult {
     authorized(access); if (input.scope) authorized(access, input.scope);

@@ -55,6 +55,14 @@
   ],
   "tools": [
     {
+      "name": "updates",
+      "description": "Read current Mind outcomes and blockers for an original conversation. Only the bound Chat application may query its own source roots; no execution or external notification.",
+      "visibility": ["modules"],
+      "idempotent": true,
+      "parameters": {"type":"object","properties":{"conversationId":{"type":"string"}},"required":["conversationId"],"additionalProperties":false},
+      "output": {"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}
+    },
+    {
       "name": "context",
       "description": "Read sourced user understanding, ongoing goals and source coverage. Scope is bounded; no Agent execution. Missing coverage remains unknown.",
       "visibility": [
