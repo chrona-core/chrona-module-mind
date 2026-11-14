@@ -177,7 +177,7 @@ export class CoreTransaction {
     }
     if (!result.checkpoints.length) result.unknowns.push("no_source_coverage");
   }
-  private contextCandidates(options: ContextCollection): ContextCandidate[] {
+  private contextCandidates(options: Pick<ContextCollection, "applies" | "readable" | "includeCompleted">): ContextCandidate[] {
     const evidence = new Map<string, CoreRecords["evidence"] | undefined>();
     const source = (id: string) => {
       if (!evidence.has(id)) evidence.set(id, this.get("evidence", id));
@@ -198,6 +198,10 @@ export class CoreTransaction {
           cp.sourceIdentity === e.sourceIdentity && cp.epoch === e.epoch && cp.scopeRevision === e.scopeRevision && cp.coverage.complete)));
       return ready ? [{ kind, item, evidence: sources as CoreRecords["evidence"][], score: 0 }] : [];
     });
+  }
+  visiblePursuits(options: Pick<ContextCollection, "applies" | "readable" | "limit">): Pursuit[] {
+    return this.contextCandidates({ ...options, includeCompleted: true }).filter(c => c.kind === "pursuits").map(c => c.item as Pursuit)
+      .sort((a,b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id)).slice(0, options.limit);
   }
   private addContextRecord(result: ContextResult, candidate: ContextCandidate, options: ContextCollection): void {
     if (result.understandings.length + result.pursuits.length >= options.limit) { result.truncated = true; return; }
