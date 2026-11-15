@@ -1,5 +1,5 @@
 import {CoreOrganizer} from './core-organizer';
-import {mainModelSelection} from './core-execution';
+import {hasTerminalObservation,mainModelSelection} from './core-execution';
 import {Database} from 'bun:sqlite';
 import {join} from 'node:path';
 import {CORE_DATABASE_FILE,coreDigest,type CoreMindStore} from './core-store';
@@ -231,7 +231,8 @@ export class CoreRuntime {
   const executions=this.journal.all();
   for(const e of executions){
    if(e.settled&&e.runId&&this.store.read().pursuits.some(p=>p.currentActor?.runRef===e.runId)&&!this.hasPendingVerification(e.id)){
-    // Recover ownership left behind by an older settlement, using the original stop receipt.
+    // Recover ownership from authenticated terminal evidence without calling an obsolete version's context.
+    if(hasTerminalObservation(e)){e.stopConfirmed=true;this.journal.save(e);}
     if(e.stopRequested&&!e.stopConfirmed){if(!this.journal.outstanding()){e.settled=false;e.status='unknown';this.journal.save(e);}}
     else this.releaseActor(e,`${e.id}:release`);
    }

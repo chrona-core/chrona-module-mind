@@ -22,6 +22,8 @@ export type ExecutionHooks = {
  settle: (execution: Execution) => Promise<void>;
  admitted?: (execution: Execution) => Promise<void>;
 };
+/** Persisted agent.read terminal evidence; kernel exposes uncertain stops as active/unknown. */
+export function hasTerminalObservation(e:Execution){return !!e.runId&&e.ended&&!e.active&&!e.cursor&&['finished','failed','cancelled'].includes(e.terminalStatus??'');}
 const targetKey = (t: Target) => typeof t === 'string' ? t : `${t.moduleId}:${t.tool}`;
 const errorText = (e: unknown) => e instanceof Error ? e.message.slice(0, 500) : String(e).slice(0, 500);
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -77,6 +79,7 @@ export class CoreExecutor {
   if(this.busy)return; this.busy=true;
   try {
    let e=this.journal.outstanding(); if(!e)return; e=this.refresh(e.id);
+   if(hasTerminalObservation(e)&&e.facts.every(f=>f.status!=='unknown')){e.stopConfirmed=true;this.journal.save(e);await this.settle(e);return;}
    if(e.status==='settling'){await this.settle(e);return;}
    const current=this.hooks.current(e);
    if(!current || e.activityStartedAt && Date.parse(now)-Date.parse(e.activityStartedAt)>(['opportunity','organize'].includes(e.purpose)?180000:600000))e.stopRequested=true;
@@ -108,6 +111,7 @@ export class CoreExecutor {
     const next=page.nextCursor as string|null;if(next&&next===e.cursor&&page.items.length)throw Error('Agent observation cursor did not advance');
     e.cursor=next;e.ended=page.ended;e.active=run.active;if(!run.active)e.terminalStatus=run.status;e.interactions=this.contentCurrent(e)&&Array.isArray(page.interactions)?page.interactions:[];
     e.status=run.status==='unknown'?'unknown':run.active?(e.interactions.length?'waiting':'running'):run.status==='finished'?'finished':'failed';e.error=null;
+    if(hasTerminalObservation(e))e.stopConfirmed=true;
     this.journal.save(e);
     if(page.ended&&!next&&!run.active&&(!e.stopRequested||e.stopConfirmed)){await this.settle(e);return;}
     if(!next)break;
@@ -140,7 +144,8 @@ export class CoreExecutor {
  }
  private async settle(e:Execution){
   e=this.refresh(e.id);
-  // Visibility can change after the terminal read; confirm the original stop before releasing ownership.
+  if(hasTerminalObservation(e))e.stopConfirmed=true;
+  // A changed visibility alone is not evidence of a stopped execution.
   if(e.runId&&e.stopRequested&&!e.stopConfirmed){e.status='unknown';this.journal.save(e);return;}
   if(e.facts.some(f=>f.status==='unknown')){e.status='unknown';e.error=this.contentCurrent(e)?'Original tool effect remains unknown; no new execution will start':null;this.journal.save(e);return;}
   e.status='settling';this.journal.save(e);

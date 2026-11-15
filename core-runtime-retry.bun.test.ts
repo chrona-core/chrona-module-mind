@@ -18,7 +18,7 @@ class Fixture {
  readonly directory=mkdtempSync(join(tmpdir(),'mind-bounded-retry-'));
  readonly gateway=new Database(join(this.directory,'gateway.sqlite'));
  now='2026-11-13T10:00:00.000Z';hash='tools-v1';reverse=false;loseReply=false;directoryCalls=0;readCalls=0;keys:string[]=[];
- failDescription=false;holdDirectory?:Promise<void>;directoryPages=1;
+ failDescription=false;obsoleteContext=false;holdDirectory?:Promise<void>;directoryPages=1;
  selected='';store!:CoreMindStore;service!:CoreMindService;actions!:CoreActions;runtime!:CoreRuntime;
  constructor(){this.gateway.exec('CREATE TABLE runs(key TEXT PRIMARY KEY,json TEXT NOT NULL)');this.open();}
  open(){this.store=new CoreMindStore(this.directory);this.service=new CoreMindService(this.store,{now:()=>this.now});this.actions=new CoreActions(this.directory,this.service);this.runtime=new CoreRuntime(this.store,this.service,this.call,()=>identity,this.actions,()=>this.now);}
@@ -32,6 +32,7 @@ class Fixture {
  goal(key='goal'){const p=this.service.pursue({actionKey:key,expectedRevision:0,expectedVisibilityRevision:this.store.read().visibilityRevision,semanticKey:key,goal:'Prepare a useful result',completionCriteria:['A usable result'],scope:{},reason:'explicit-goal',evidenceRefs:[]},owner).value!;this.selected=p.id;return p;}
  control(operation:'pause'|'resume',key:string=operation){return this.service.control({actionKey:key,expectedRevision:this.pursuit.revision,expectedVisibilityRevision:this.store.read().visibilityRevision,kind:'pursuit',id:this.pursuit.id,operation},owner);}
  readonly call:CoreCall=async(target,args,options)=>{
+  if(this.obsoleteContext&&(target==='agent.stop'||target==='agent.read'))throw Error('Obsolete context unavailable');
   if(target==='modules.list'){this.directoryCalls++;await this.holdDirectory;const items=[{id:identity.moduleId,name:'mind',hash:identity.hash},{id:'installed-app',name:'author',hash:this.hash}];return {items:this.reverse?items.reverse():items,nextCursor:this.directoryPages>1&&!args.cursor?'page-2':null};}
   if(target==='modules.describe'){this.directoryCalls++;if(this.failDescription)throw Error('Directory unavailable');return {items:[{target:{moduleId:'installed-app',tool:'read'},description:'Read current prepared material'}],nextCursor:null};}
   if(target==='agent.run'){
@@ -260,11 +261,11 @@ test('startup directory discovery does not block original lost-command reconcili
  }finally{release?.();f.close();}
 });
 
-test('restart reconciles the original stop and releases an actor left by an older settled execution',async()=>{
+test.each([true,false])('restart releases an older actor from terminal evidence without accessing its obsolete context (settled=%s)',async settled=>{
  const f=new Fixture();try{
   f.goal();await f.runtime.tick();const e=f.runtime.journal.outstanding()!;expect(f.pursuit.currentActor?.runRef).toBe(e.runId!);
-  f.finish();e.ended=true;e.active=false;e.terminalStatus='finished';e.stopRequested=true;e.stopConfirmed=false;e.settled=true;e.status='failed';f.runtime.journal.save(e);
-  f.restart();await f.runtime.tick(false,false,false);
+  f.finish();e.ended=true;e.active=false;e.terminalStatus='finished';e.stopRequested=true;e.stopConfirmed=false;e.settled=settled;e.status='failed';f.runtime.journal.save(e);
+  f.obsoleteContext=true;f.restart();await f.runtime.tick(false,false,false);
   expect(f.pursuit.currentActor).toBeUndefined();expect(f.runtime.journal.get(e.id).stopConfirmed).toBe(true);expect(f.runs()).toHaveLength(1);
  }finally{f.close();}
 });
