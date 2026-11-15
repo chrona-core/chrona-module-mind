@@ -287,8 +287,8 @@ The actual owner coordinator (or trusted runtime when autoSubmit is enabled) rev
   for(const fact of e.facts){
    if(fact.status!=='succeeded'||fact.outputState!=='complete'||typeof fact.target==='string'||fact.target.moduleId!==this.self().moduleId||fact.target.tool!=='progress')continue;
    const output=unwrap(fact.output);if(!object(output))continue;
-   const candidate=state.candidates.find(c=>c.receipt===output.receipt||c.id===output.id||object(output.value)&&c.receipt===output.value.receipt);
-   if(!candidate||candidate.runRef!==e.runId)continue;
+   const candidate=this.store.read().candidates.find(c=>c.receipt===output.receipt||c.id===output.id||object(output.value)&&c.receipt===output.value.receipt);
+   if(!candidate||candidate.runRef!==e.runId||candidate.state!=='pending')continue;
    if(candidate.desiredStatus==='done'){
     try{const request=this.verification.prepare(candidate.id,e);this.journal.db.query('INSERT OR IGNORE INTO verification_pending(id,candidate_id,worker_id) VALUES(?,?,?)').run(request.id,candidate.id,e.id);continue;}
     catch(error){const reason=error instanceof Error?error.message:String(error);console.error(json({component:'mind',event:'verification_not_prepared',candidateId:candidate.id,error:reason}));this.service.rejectProgress({candidateId:candidate.id,expectedRevision:candidate.pursuitRevision,expectedVisibilityRevision:state.visibilityRevision,actionKey:`${e.id}:${fact.callId}:reject`,reason:`Verification could not start: ${reason}`},RUNTIME_ACCESS);continue;}
@@ -296,6 +296,9 @@ The actual owner coordinator (or trusted runtime when autoSubmit is enabled) rev
    const documents=candidate.artifactRefs.map(ref=>{try{return this.actions.read(ref);}catch(error){console.error(json({component:'mind',event:'artifact_unverified',error:error instanceof Error?error.message:String(error)}));return null;}});
    // Local exact material verification proves artifact existence/integrity; semantic completion remains explicit until independent acceptance.
    const measured=documents.length>0&&documents.every(d=>!!d&&d.pursuitId===candidate.pursuitId);
+   if(candidate.artifactRefs.length&&!measured){
+    this.service.rejectProgress({candidateId:candidate.id,expectedRevision:candidate.pursuitRevision,expectedVisibilityRevision:state.visibilityRevision,actionKey:`${e.id}:${fact.callId}:reject`,reason:'结果引用的文件或应用回执已撤回、不可读或不属于当前事项，需要重新核实。'},RUNTIME_ACCESS);continue;
+   }
    this.service.applyProgress({candidateId:candidate.id,expectedRevision:candidate.pursuitRevision,expectedVisibilityRevision:state.visibilityRevision,actionKey:`${e.id}:${fact.callId}:apply`,verified:{candidateReceipt:candidate.receipt,runRef:e.runId!,originalReceiptRef:candidate.originalReceiptRef,artifactRefs:measured?candidate.artifactRefs:[],method:measured?'Exact persisted local artifact digest; semantic acceptance still required':'Actual tool result; outcome requires independent verification',criteriaSatisfied:false,executionTerminal:e.ended&&!e.active}},RUNTIME_ACCESS);
   }
   if(!this.hasPendingVerification(e.id))this.releaseActor(e,`${e.id}:release`);

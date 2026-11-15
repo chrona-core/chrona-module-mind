@@ -406,3 +406,16 @@ test('forget removes verifier excerpts and prompts, withdrawn documents and old 
  expect(f.runtime.accessForCaller('self',true,worker.runId).execution).toBeUndefined();
  }finally{f.cleanup();}
 });
+
+test('unreadable progress artifacts become a visible verification wait and never wedge terminal settlement',async()=>{
+ const f=new Harness();try{
+  const evidence=f.ingest('Prepare the requested train itinerary.');
+  f.service.pursue({actionKey:'owner-goal',expectedRevision:0,expectedVisibilityRevision:f.store.read().visibilityRevision,semanticKey:'train-before-noon',goal:'Prepare train itinerary',completionCriteria:[criterion],scope,reason:'explicit-goal',evidenceRefs:[evidence]},owner);
+  await f.runtime.tick();const worker=f.gateway.runs()[0];
+  const progress=f.service.progress({...f.mutation('bad-artifact-progress'),summary:'Needs further verification',artifactRefs:['mind-document:withdrawn'],originalReceiptRef:'withdrawn',evidenceRefs:[evidence],desiredStatus:'waiting'},f.workerAccess());
+  f.gateway.result(worker.runId,'progress',progress);f.gateway.result(worker.runId,'progress',progress,'replayed-progress');f.gateway.finish(worker.runId);await f.runtime.tick(false,false,false);
+  expect(f.runtime.journal.outstanding()).toBeUndefined();expect(f.pursuit.currentActor).toBeUndefined();expect(f.pursuit).toMatchObject({status:'waiting',waitFor:'verification'});
+  expect(f.pursuit.waitReason).toContain('需要重新核实');expect(f.pursuit.artifactRefs).toEqual([]);
+  f.restart();await f.runtime.tick(false,false,false);expect(f.runtime.journal.outstanding()).toBeUndefined();expect(f.gateway.runs()).toHaveLength(1);
+ }finally{f.cleanup();}
+});
