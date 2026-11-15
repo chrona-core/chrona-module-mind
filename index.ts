@@ -5,6 +5,7 @@ import {CoreMindStore,coreDigest} from './core-store';
 import {CoreMindService} from './core-service';
 import {CoreRuntime,deliveryRuntimeHooks} from './core-runtime';
 import {CoreActions} from './core-actions';
+import {CoreTaskView,taskOwnerAccess} from './core-task-view';
 import {artifactToolResult} from './core-artifact';
 import {CoreApplication} from './core-application';
 import {CoreDelivery} from './core-delivery';
@@ -37,7 +38,8 @@ const delivery:CoreDelivery=new CoreDelivery(chrona.paths.data,service,rawCall,{
 const observe:CoreCall=(target,args,options)=>runtime.observe(target,args,options,typeof target==='object'&&target.tool==='observation-scope'?'source-control':'source-data');
 const sources=new CoreSources(store,service,observe,async()=>{const id=chrona.dependencies['chat'];if(!id)return undefined;const rows=await directoryRows((target,args)=>runtime.observe(target,args,undefined,'source-control'));const row=rows.find(m=>m.id===id);return row?.activeHash?{moduleId:id,hash:row.activeHash}:undefined;});
 const TOOLS=['overview','detail','settings','context','remember','pursue','control','feedback','forget','applications','delivery','artifact','check','recovery'];
-const tools=new Set([...TOOLS,'updates','progress','action','organized','observe','verdict','admission-verdict']);let pagesReady=false,maintaining=false,closed=false;
+const taskView=new CoreTaskView(store,service,actions,()=>runtime.journal.all(),{chatIdentity:()=>chrona.dependencies['chat'],deliveries:delivery});
+const tools=new Set([...TOOLS,'updates','progress','action','organized','observe','verdict','admission-verdict','task-view','task-control']);let pagesReady=false,maintaining=false,closed=false;
 const log=(event:string,error:unknown)=>console.error(JSON.stringify({component:'mind',event,error:error instanceof Error?error.message.slice(0,500):String(error).slice(0,500)}));
 async function directoryRows(call:CoreCall){
  const rows:{id:string;name:string;activeHash:string}[]=[],seen=new Set<string>();let cursor:string|undefined;
@@ -106,10 +108,12 @@ async function background(manual=false){
 on('tool',async event=>{
  try{
   if(!tools.has(event.id))throw new ModelError('invalid','Unknown Mind tool');if(!identity)await verifyIdentity();
-  recovery.guard();const a=event.args,who=access(event.caller,event.id,event.call?.executionRunId);let result:unknown;
+  recovery.guard();const a=event.args,who=['task-view','task-control'].includes(event.id)?taskOwnerAccess(event.caller,event.call?.chain,chrona.dependencies):access(event.caller,event.id,event.call?.executionRunId);let result:unknown;
   if(store.inspect(tx=>tx.settings().restoreBlocked)&&who.role!=='owner'&&['context','updates','detail','artifact','overview'].includes(event.id))throw new CoreError('RESTORE_BLOCKED','Restored memory is unavailable until owner review');
   switch(event.id){
    case 'context':result=service.context(contextInput(a),who);break;
+   case 'task-view':result=taskView.view(a as {id?:string;artifactRef?:string},who);break;
+   case 'task-control':result=taskView.control(input(a) as never,who);await runtime.executor.reconcile();break;
    case 'updates':{
     if(event.caller?.kind!=='module'||event.caller.moduleId!==chrona.dependencies['chat'])throw new ModelError('forbidden','Only the bound Chat application may read its conversation updates');
     result=service.conversationUpdates(event.caller.moduleId,String(a.conversationId??''),who,{epoch:a.epoch,scopeRevision:a.scopeRevision});break;
@@ -193,7 +197,7 @@ on('tool',async event=>{
     break;
    }
    case 'artifact':{
-    const document=actions.read(String(a.ref),who);
+    const document=actions.read(String(a.ref),who,{full:a.full===true});
     result=who.role==='owner'&&a.offset===undefined?document:artifactToolResult(document,a.offset as number|undefined);
     break;
    }

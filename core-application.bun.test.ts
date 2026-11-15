@@ -246,3 +246,14 @@ function fixture() {
   const failed = await f.app.invoke(f.input(a.id), runtime);
   expect(failed.status).toBe('failed'); expect(failed.responseBody).toBeUndefined(); expect(failed.responseDigest).toBeUndefined();
  });
+
+test('focus is local to reviewed apps overview and cannot expand another adapter contract', async () => {
+  const f = fixture(), granted = await f.app.grant(f.grantInput, owner);
+  await expect(f.app.invoke({ ...f.input(granted.id), focus: { name: 'catalog' } }, runtime)).rejects.toThrow('reviewed apps overview');
+  const pi = (await f.app.list(runtime)).find(a => a.moduleId === 'pi-real')!;
+  await expect(f.app.invoke({ ...f.input(pi.id), params: {}, focus: { name: 'catalog' } }, runtime)).rejects.toThrow('reviewed apps overview');
+  f.setRows([...f.rows(), { id: 'apps-real', name: 'apps', activeHash: 'reviewed-apps' }]);
+  const apps = (await f.app.list(runtime)).find(a => a.moduleId === 'apps-real')!;
+  await expect(f.app.invoke({ ...f.input(apps.id), params: {}, focus: {} }, runtime)).rejects.toThrow('moduleId or name');
+  expect(f.calls).toHaveLength(0);
+});

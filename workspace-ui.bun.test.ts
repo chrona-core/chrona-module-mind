@@ -342,3 +342,66 @@ test('user can reopen an unresolved completed improvement from its detail',async
   await wait(()=>visible().includes(item.goal));await click(item.goal);await wait(()=>buttons().some(b=>b.textContent==='仍未解决，继续改进'));await click('仍未解决，继续改进');await wait(()=>writes.length===1);
   expect(writes[0]).toMatchObject({tool:'feedback',input:{targetKind:'pursuit',targetId:item.id,value:'restart',expectedRevision:item.revision}});
 });
+
+const feedbackGoal = `改进 应用中心：改善应用列表的布局与操作\n反馈对应版本：${'a'.repeat(40)}；应用：a72dc177-cd15-47fa-9335-18e2ec58e4c2；页面：/p/apps/available`;
+const readableTitle = '改进 应用中心：改善应用列表的布局与操作';
+
+test('existing goal supplies the same readable task and detail title; original identity stays expandable', async () => {
+  const item = { ...pursuit, goal: feedbackGoal, updatedAt: '2026-11-15T12:08:48Z' };
+  await start(async tool => envelope(tool === 'overview' ? overview([item]) : item));
+  await wait(() => !!container.querySelector('.mind-title-button'));
+  const card = container.querySelector('.mind-card')!;
+  expect(card.querySelector('h3')?.textContent).toBe(readableTitle);
+  const technical = card.querySelector('details')!;
+  expect(technical.open).toBe(false);
+  expect(technical.textContent).toContain(item.id);
+  expect(technical.textContent).toContain(feedbackGoal);
+  technical.querySelector('summary')!.click();
+  expect(technical.open).toBe(true);
+  await click(readableTitle);
+  await wait(() => !!container.querySelector('.mind-detail .mind-tag'));
+  expect(container.querySelector('.mind-detail h2')?.textContent).toBe(readableTitle);
+  expect(container.querySelector<HTMLDetailsElement>('.mind-detail details')?.open).toBe(false);
+});
+
+for (const [status, waitFor, waitReason, nextStep, expected] of [
+  ['waiting', 'user', '应用已启用，等待用户验收', '刷新页面并验收布局', '待你验收'],
+  ['waiting', 'user', '需要补充页面截图', '提供截图', '需要你处理'],
+  ['waiting', 'permission', '需要批准才能继续核验', '审阅候选改动', '需要你处理'],
+  ['waiting', 'external', '等待外部回执', '查询原回执', '等待条件'],
+  ['failed', undefined, '检查未通过', '查看失败原因', '执行失败'],
+  ['finished', undefined, '执行已结束，目标尚未核对', '核对实际效果', '本轮执行结束'],
+  ['active', undefined, '', '核对页面效果', '正在推进'],
+  ['done', undefined, '', '', '已完成'],
+] as const) {
+  test(`task card and detail retain truthful ${status}/${waitFor} status`, async () => {
+    const item = { ...pursuit, goal: feedbackGoal, status, waitFor, waitReason, nextStep, currentActor: { runRef: 'finished-run' } };
+    await start(async tool => envelope(tool === 'overview' ? overview([item]) : item));
+    await wait(() => !!container.querySelector('.mind-title-button'));
+    expect(container.querySelector('.mind-card .mind-tag')?.textContent).toBe(expected);
+    expect(container.querySelector('.mind-card h3')?.textContent).toBe(readableTitle);
+    if (status !== 'done') expect(container.querySelector('[aria-label="最近完成"]')).toBeNull();
+    await click(readableTitle);
+    await wait(() => !!container.querySelector('.mind-detail .mind-tag'));
+    expect(container.querySelector('.mind-detail .mind-tag')?.textContent).toBe(expected);
+    expect(container.querySelector('.mind-detail')?.textContent).toContain(nextStep);
+  });
+}
+
+test('artifact titles retain their meaning and technical references can be expanded', async () => {
+  const artifact = { id: 'artifact-001', ref: `doc:${'b'.repeat(64)}`, title: `应用列表改版 · ${'b'.repeat(64)}`, body: '已调整布局；等待你确认实际效果。', format: 'text' };
+  const item = { ...pursuit, goal: feedbackGoal, artifactRefs: [artifact.ref] };
+  await start(async tool => envelope(tool === 'overview' ? overview([item]) : { pursuit: item, artifacts: [artifact, { ref: 'doc:untitled', body: '核验记录' }], evidence: [] }));
+  await wait(() => !!container.querySelector('.mind-title-button'));
+  await click(readableTitle);
+  await wait(() => container.querySelectorAll('.mind-artifact').length === 2);
+  const cards = Array.from(container.querySelectorAll('.mind-artifact'));
+  expect(cards.map(card => card.querySelector('h4')?.textContent)).toEqual(['应用列表改版', `${readableTitle} · 成果`]);
+  const technical = cards[0]!.querySelector('details')!;
+  expect(technical.open).toBe(false);
+  technical.querySelector('summary')!.click();
+  expect(technical.open).toBe(true);
+  expect(technical.textContent).toContain(artifact.ref);
+  expect(technical.textContent).toContain(artifact.id);
+  expect(container.querySelector('.mind-detail')?.textContent).toContain('等待你确认实际效果');
+});

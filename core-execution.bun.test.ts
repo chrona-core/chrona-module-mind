@@ -11,10 +11,10 @@ test('lost reply and restart reconcile exact original run once, only complete re
  const call:CoreCall=async(target,args,options)=>{if(target==='agent.run'){runCalls++;keys.push(options!.key!);if(runCalls===1)throw Error('reply lost');return {runId:'r',contextId:'c',active:true,status:'running'};}
  if(target==='agent.read')return {run:{runId:'r',contextId:'c',active:false,status:'finished'},ended:true,nextCursor:null,interactions:[],items:[
  {kind:'tool-result',payload:{type:'tool-result',value:{runId:'other',callId:'forged',target:input.tools[0],moduleId:'mind-id',hash:'h',status:'succeeded',outputState:'complete',output:{receipt:'wrong'}}}},
- {kind:'tool-result',payload:{type:'tool-result',value:{runId:'r',callId:'yes',target:input.tools[0],moduleId:'mind-id',hash:'h',status:'succeeded',outputState:'complete',output:{receipt:'actual'}}}},
+ {at:now,kind:'tool-result',payload:{type:'tool-result',value:{runId:'r',callId:'yes',target:input.tools[0],moduleId:'mind-id',hash:'h',status:'succeeded',outputState:'complete',output:{receipt:'actual'}}}},
  ]};throw Error('Unexpected '+target);};
  try{f.journal.prepare(input,now);await new CoreExecutor(f.journal,call,{current:()=>true,settle:async e=>{settled=e;}}).reconcile(now);expect(f.journal.outstanding()?.status).toBe('unknown');
- await new CoreExecutor(f.journal,call,{current:()=>true,settle:async e=>{settled=structuredClone(e);}}).reconcile(now);expect(keys[0]).toBe(keys[1]);expect(settled?.facts.map(f=>f.callId)).toEqual(['yes']);expect(f.journal.outstanding()).toBeUndefined();}finally{f.cleanup();}
+ await new CoreExecutor(f.journal,call,{current:()=>true,settle:async e=>{settled=structuredClone(e);}}).reconcile(now);expect(keys[0]).toBe(keys[1]);expect(settled?.facts.map(f=>f.callId)).toEqual(['yes']);expect(settled?.facts[0]?.at).toBe(now);expect(f.journal.outstanding()).toBeUndefined();}finally{f.cleanup();}
 });
 test('withdrawal before dispatch cancels without any Agent call; unknown stop keeps occupying concurrency',async()=>{
  const f=fixture();let calls=0;try{f.journal.prepare(input,now);const ex=new CoreExecutor(f.journal,async()=>{calls++;throw Error('not expected');},{current:()=>false,settle:async()=>{}});await ex.reconcile(now);expect(calls).toBe(0);expect(f.journal.outstanding()).toBeUndefined();

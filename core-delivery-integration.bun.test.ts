@@ -175,7 +175,11 @@ test('autoSubmit resumes ready deliveries after restart and reconciles a lost su
   const r=await ready(f);autoSubmit(f);f.gateway.lostSubmit=true;f.restart();
   await f.runtime.reconcileOriginals();expect(f.gateway.commands('submit')).toHaveLength(0);
   await f.runtime.tick(false,false);expect(f.delivery.detail(r.id,owner).status).toBe('submit-unknown');
-  expect(f.gateway.commands('submit')).toHaveLength(1);f.restart();await f.runtime.reconcileOriginals();
+  expect(f.gateway.commands('submit')).toHaveLength(1);
+  f.delivery.withdraw(r.id,owner);
+  const outcomes=deliveryRuntimeHooks(()=>f.delivery,()=>f.proof).deliveryOutcomes!();
+  expect(outcomes.find(outcome=>outcome.id===r.id)).toMatchObject({status:'submit-unknown',withdrawn:true,requestKey:r.input.requestKey,admissionId:r.input.admissionId});
+  f.restart();await f.runtime.reconcileOriginals();
   expect(f.gateway.commands('modules.receipt').at(-1)?.args).toEqual({admissionId:r.input.admissionId,key:r.input.requestKey});
   await f.runtime.tick(false,false);expect(f.gateway.commands('submit')).toHaveLength(1);
  }finally{f.close();}

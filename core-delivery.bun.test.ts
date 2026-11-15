@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { CoreDelivery, deliveryPrepareSchema, deliveryReceiptSchema, type DeliveryPrepare } from './core-delivery';
 import { CoreMindStore } from './core-store';
 import { CoreMindService } from './core-service';
+import { deliveryRuntimeHooks } from './core-runtime';
 import { CoreExecutionJournal, type CoreCall } from './core-execution';
 import type { CoreAccess, Pursuit } from './core-types';
 import { candidateReceiptSchema } from '../../../../../../contracts/src/steward/module-candidates';
@@ -49,6 +50,45 @@ test('actual stage proof gates owner-only submission; exact structured receipt a
   f.state.badReceipt=true;await expect(f.delivery.reconcile(r.id,owner)).rejects.toThrow('Immutable');expect(f.delivery.detail(r.id,owner).receipt!.receiptId).toBe('real-receipt');
  }finally{f.cleanup();}
 });
+test.each([false,true])('first prepared material survives applied progress and auto submission (released=%s)',async released=>{
+ const f=fixture();try{
+  const r=await f.delivery.prepare(f.input,f.worker),before=f.delivery.detail(r.id,owner);
+  const p=f.store.read().pursuits[0]!;
+  const candidate=f.service.progress({pursuitId:p.id,expectedRevision:p.revision,expectedVisibilityRevision:0,actionKey:'progress',summary:'Exact material is ready; waiting for user acceptance',artifactRefs:['artifact:calendar-stage'],originalReceiptRef:'worker-stage-receipt',evidenceRefs:p.evidenceRefs,desiredStatus:'waiting',waitFor:'user',waitReason:'Await user acceptance',nextStep:'Check the original delivery receipt'},f.worker).value!;
+  expect(await f.stage(r.id)).toBe(1);
+  const applied=f.service.applyProgress({candidateId:candidate.id,expectedRevision:p.revision,expectedVisibilityRevision:0,actionKey:'apply-progress',verified:{candidateReceipt:candidate.receipt,runRef:'actual-run',originalReceiptRef:candidate.originalReceiptRef,artifactRefs:candidate.artifactRefs,method:'Exact persisted stage material',criteriaSatisfied:false,executionTerminal:true}},f.worker).value!;
+  expect(applied.applied).toBe(true);
+  expect(applied.pursuit).toMatchObject({status:'waiting',waitFor:'user',artifactRefs:candidate.artifactRefs,nextStep:candidate.nextStep,verification:{runRef:'actual-run',originalReceiptRef:candidate.originalReceiptRef}});
+  if(released)f.service.release({pursuitId:p.id,expectedRevision:applied.pursuit.revision,expectedVisibilityRevision:0,actionKey:'release-progress',runRef:'actual-run',executionStopped:true,effectsReconciled:true},f.worker);
+  f.reopen();expect(f.delivery.cleanupWithdrawn()).toEqual({deferred:0});
+  const hooks=deliveryRuntimeHooks(()=>f.delivery,()=>{throw Error('Stage proof already captured');});
+  await hooks.advanceDeliveries!(()=>true);
+  expect(f.delivery.detail(r.id,owner)).toMatchObject({status:'submitted',requestKey:before.requestKey,prepareDigest:before.prepareDigest,materials:before.materials,receipt:f.receipt});
+  expect(f.state.submits).toBe(1);expect(f.journal.all()).toHaveLength(1);
+  expect(f.store.read().pursuits[0]!.status).toBe('waiting');
+ }finally{f.cleanup();}
+});
+
+test('real user correction after stage and responsibility release invalidates the first material',async()=>{
+ const f=fixture();try{
+  const r=await f.delivery.prepare(f.input,f.worker);expect(await f.stage(r.id)).toBe(1);
+  const released=f.service.release({pursuitId:f.input.pursuitId,expectedRevision:f.input.expectedRevision,expectedVisibilityRevision:0,actionKey:'release-before-correction',runRef:'actual-run',executionStopped:true,effectsReconciled:true},f.worker).value as Pursuit;
+  f.service.control({kind:'pursuit',id:released.id,operation:'correct',value:'Deliver a read-only calendar',completionCriteria:['Never modify existing events'],expectedRevision:released.revision,expectedVisibilityRevision:0,actionKey:'owner-correction'},owner);
+  f.reopen();await expect(f.delivery.submit(r.id,owner)).rejects.toThrow('authorization');
+  expect(f.state.submits).toBe(0);expect(f.delivery.detail(r.id,owner).status).toBe('failed');
+ }finally{f.cleanup();}
+});
+
+test.each(['pause','end','forget'] as const)('real user %s after responsibility release still blocks fresh submission',async operation=>{
+ const f=fixture();try{
+  const r=await f.delivery.prepare(f.input,f.worker);expect(await f.stage(r.id)).toBe(1);
+  const p=f.service.release({pursuitId:f.input.pursuitId,expectedRevision:f.input.expectedRevision,expectedVisibilityRevision:0,actionKey:'release-before-control',runRef:'actual-run',executionStopped:true,effectsReconciled:true},f.worker).value as Pursuit;
+  if(operation==='forget')f.service.forget({target:{kind:'evidence',id:p.evidenceRefs[0]!},expectedVisibilityRevision:0,actionKey:'owner-forget'},owner);
+  else f.service.control({kind:'pursuit',id:p.id,operation,expectedRevision:p.revision,expectedVisibilityRevision:0,actionKey:'owner-control'},owner);
+  f.reopen();await expect(f.delivery.submit(r.id,owner)).rejects.toThrow();expect(f.state.submits).toBe(0);
+ }finally{f.cleanup();}
+});
+
 test('lost reply survives restart and withdrawal; only original admission/key receipt query is sent',async()=>{
  const f=fixture();try{const r=await f.delivery.prepare(f.input,f.worker);await f.stage(r.id);f.state.lost=true;await expect(f.delivery.submit(r.id,owner)).rejects.toThrow('lost reply');expect(f.delivery.detail(r.id,owner).status).toBe('submit-unknown');f.reopen();
   f.store.update(tx=>{const m=tx.meta();m.visibilityRevision++;tx.setMeta(m);});
@@ -72,8 +112,8 @@ test('current real worker, reserved names, NEW targets, original command conflic
  }finally{f.cleanup();}
 });
 test('fresh submit blocks stale authorization, changed Author identity, denied admission and expired source evidence',async()=>{
- for(const kind of ['visibility','revision','disabled','author','admission','expired']){const f=fixture();try{const r=await f.delivery.prepare(f.input,f.worker);await f.stage(r.id);
-  if(kind==='author')f.state.authorHash='e'.repeat(40);else if(kind==='admission')f.state.admission=false;else f.store.update(tx=>{if(kind==='visibility'){const m=tx.meta();m.visibilityRevision++;tx.setMeta(m);}if(kind==='disabled'){const s=tx.settings();s.enabled=false;tx.setSettings(s);}if(kind==='revision'){const p=tx.get('pursuit',f.input.pursuitId)!;p.revision++;tx.put('pursuit',p);}if(kind==='expired'){const e=tx.list('evidence')[0]!;e.expiredAt=new Date().toISOString();tx.put('evidence',e);}});
+ for(const kind of ['visibility','criteria','disabled','author','admission','expired']){const f=fixture();try{const r=await f.delivery.prepare(f.input,f.worker);await f.stage(r.id);
+  if(kind==='author')f.state.authorHash='e'.repeat(40);else if(kind==='admission')f.state.admission=false;else f.store.update(tx=>{if(kind==='visibility'){const m=tx.meta();m.visibilityRevision++;tx.setMeta(m);}if(kind==='disabled'){const s=tx.settings();s.enabled=false;tx.setSettings(s);}if(kind==='criteria'){const p=tx.get('pursuit',f.input.pursuitId)!;p.completionCriteria=['Different user acceptance criteria'];tx.put('pursuit',p);}if(kind==='expired'){const e=tx.list('evidence')[0]!;e.expiredAt=new Date().toISOString();tx.put('evidence',e);}});
   await expect(f.delivery.submit(r.id,owner)).rejects.toThrow();expect(f.state.submits).toBe(0);
   expect(f.delivery.detail(r.id,owner).status).toBe('failed');expect(f.delivery.pendingFor(f.input.pursuitId)).toBe(false);
   expect(f.delivery.list({},owner).items[0]).toMatchObject({status:'failed',needsDecision:false,observation:expect.stringContaining('before dispatch')});

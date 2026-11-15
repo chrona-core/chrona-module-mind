@@ -60,10 +60,40 @@
     {
       "name": "updates",
       "description": "Read current Mind outcomes and blockers for an original conversation. Only the bound Chat application may query its own source roots; no execution or external notification.",
-      "visibility": ["modules"],
+      "visibility": [
+        "modules"
+      ],
       "idempotent": true,
-      "parameters": {"type":"object","properties":{"conversationId":{"type":"string"},"epoch":{"type":"string"},"scopeRevision":{"type":"number"}},"required":["conversationId","epoch","scopeRevision"]},
-      "output": {"type":"object","properties":{"json":{"type":"string"}},"required":["json"]}
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "conversationId": {
+            "type": "string"
+          },
+          "epoch": {
+            "type": "string"
+          },
+          "scopeRevision": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "conversationId",
+          "epoch",
+          "scopeRevision"
+        ]
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "json"
+        ]
+      }
     },
     {
       "name": "context",
@@ -417,7 +447,7 @@
     },
     {
       "name": "action",
-      "description": "Create a version/actor-guarded local document, or invoke an owner-reviewed granted application read with target=application-read, adapterId and params. Both require pursuitId, expectedRevision, expectedVisibilityRevision and actionKey; returned canonical artifact refs may support independent result verification.",
+      "description": "Create a guarded document or reviewed application read. input JSON: target document or application-read, pursuitId, expectedRevision, expectedVisibilityRevision, actionKey; reads also need adapterId/params. For apps.overview, optional focus:{moduleId?,name?} returns matching records and shared notices. Original sanitized response remains readable with artifact full=true; omitted data is not verified.",
       "visibility": [
         "owner",
         "modules"
@@ -452,7 +482,7 @@
     },
     {
       "name": "artifact",
-      "description": "Read persisted artifact content and digest. Large results return an artifact-manifest; pass offset:0 and follow nextOffset until null to read all chunks. Offsets count UTF-16 code units. Original pursuit access remains required.",
+      "description": "Read persisted artifact content and digest. Large results return an artifact-manifest; pass offset:0 and follow nextOffset until null to read all chunks. Offsets count UTF-16 code units. Original pursuit access remains required. For a focused application artifact, full=true reads the complete original sanitized response; omit it for the target projection.",
       "visibility": [
         "owner",
         "modules"
@@ -466,6 +496,9 @@
           },
           "offset": {
             "type": "number"
+          },
+          "full": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -732,6 +765,69 @@
           "json"
         ],
         "additionalProperties": false
+      }
+    },
+    {
+      "name": "task-view",
+      "description": "Read the owner’s persistent tasks, or one task and its actual progress/artifacts. User interface only; no Agent execution.",
+      "visibility": [
+        "owner",
+        "modules"
+      ],
+      "idempotent": true,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "artifactRef": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "json"
+        ]
+      }
+    },
+    {
+      "name": "task-control",
+      "description": "Supplement, pause or resume the same persistent task through existing Mind feedback/control. Requires authenticated owner interface and original action key/revisions.",
+      "visibility": [
+        "owner",
+        "modules"
+      ],
+      "idempotent": false,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input"
+        ]
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "json"
+        ]
       }
     }
   ]
