@@ -10,8 +10,9 @@ import type { CoreCall, Execution } from './core-execution';
 const id = z.string().min(1).max(128), hash = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
 const identity = z.object({ moduleId: id, hash }).strict();
 const intent = z.object({ changes: z.array(z.string().trim().min(1).max(500)).min(1).max(20), preserves: z.array(z.string().trim().min(1).max(500)).max(20) }).strict();
-const name = z.string().regex(/^[a-z][a-z0-9-]{1,40}$/).refine(n => !['mind','chat','pi','author','web','self','core','agent'].includes(n), 'Reserved target');
-const item = z.object({ name, dir: z.string().regex(/^packages\/[a-z][a-z0-9-]{0,63}\/source$/).max(180), intent, materialDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+const name = z.string().regex(/^[a-z][a-z0-9-]{1,40}$/).refine(n => !['self','core','agent'].includes(n), 'Reserved target');
+const baseline = z.object({ moduleId: id, expectedActiveHash: hash }).strict();
+const item = z.object({ name, baseline: baseline.optional(), dir: z.string().regex(/^packages\/[a-z][a-z0-9-]{0,63}\/source$/).max(180), intent, materialDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 export const deliveryPrepareSchema = z.object({ pursuitId: id, expectedRevision: z.number().int().nonnegative(), expectedVisibilityRevision: z.number().int().nonnegative(), actionKey: z.string().min(1).max(200), author: identity, admissionId: id, requestKey: z.string().min(1).max(200), items: z.array(item).min(1).max(4), criteria: z.array(z.string().trim().min(1).max(1000)).min(1).max(20) }).strict().refine(v => new Set(v.items.map(i => i.name)).size === v.items.length && new Set(v.items.map(i => i.dir)).size === v.items.length, 'Duplicate material');
 export type DeliveryPrepare = z.infer<typeof deliveryPrepareSchema>;
 // Mirrors the actual kernel candidateReceiptSchema, including changing lifecycle projections.
@@ -22,7 +23,7 @@ export type DeliveryRecord = {
  id: string; pursuitId: string; revision: number; visibilityRevision: number; actionKey: string;
  author: {moduleId: string; hash: string}; admissionId: string; requestKey: string;
  worker: {executionId: string; runId: string; actor: string; principal: {moduleId: string; hash: string}};
- commandDigest: string; prepareDigest: string; pursuitBasis: string; materials: {name: string; materialDigest: string}[];
+ commandDigest: string; prepareDigest: string; pursuitBasis: string; materials: {name: string; materialDigest: string; baseline?: {moduleId: string; expectedActiveHash: string}}[];
  payload: DeliveryPrepare | null; proof: {name: string; callId: string; materialDigest: string}[];
  status: 'awaiting-worker-proof' | 'coordinator-ready' | 'submit-unknown' | 'submitted' | 'withdrawn';
  withdrawn: boolean; receipt: Receipt | null; observation: string; directory: Module[]; cleanup: string; updatedAt: string;
@@ -30,9 +31,8 @@ export type DeliveryRecord = {
 export type DeliveryOptions = {
  /** Trusted adapter reads its actual private execution journal; never supplied by a tool caller. */
  worker: (runRef: string) => Execution | undefined;
- /** Independent owner coordinator checks the REAL admission, including the complete NEW target set.
-  * Must throw unless submitter == record.author, all targets have null moduleId/activeHash,
-  * and the admitted target names exactly equal record.materials. This is not worker JSON. */
+ /** Independent owner coordinator checks the actual admission, exact targets and update baselines.
+  * This proof comes from authenticated tool results, never worker JSON. */
  verifyAdmission: (record: Readonly<DeliveryRecord>) => Promise<void>;
  /** Trusted runtime gate rechecks pending user controls immediately before a new dispatch. */
  assertMaySubmit?: (pursuitId: string) => void;
@@ -74,7 +74,7 @@ export class CoreDelivery {
  private now(){return this.options.now?.() ?? new Date().toISOString();}
  private get(idValue:string):DeliveryRecord { const row=this.db.query('SELECT body FROM delivery WHERE id=?').get(id.parse(idValue)) as {body:string}|null;if(!row)throw Error('Delivery not found');return JSON.parse(row.body); }
  private save(r:DeliveryRecord){r.updatedAt=this.now();const body=canonical(r);if(body.length>100_000)throw Error('Delivery record too large');this.db.query('INSERT INTO delivery(id,command_key,body) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body').run(r.id,coreDigest([r.author,r.admissionId,r.requestKey]),body);}
- list(input:{limit?:number;after?:string}, access:CoreAccess){owner(access);const p=z.object({limit:z.number().int().min(1).max(50).default(20),after:id.optional()}).strict().parse(input);const rows=this.db.query('SELECT body FROM delivery WHERE id>? ORDER BY id LIMIT ?').all(p.after??'',p.limit+1) as {body:string}[];const values=rows.slice(0,p.limit).map(row=>{const r:DeliveryRecord=JSON.parse(row.body);return {id:r.id,pursuitId:r.pursuitId,status:r.status,withdrawn:r.withdrawn,observation:r.observation,cleanup:r.cleanup};});return {items:values,nextCursor:rows.length>p.limit?values.at(-1)!.id:null};}
+ list(input:{limit?:number;after?:string}, access:CoreAccess){owner(access);const p=z.object({limit:z.number().int().min(1).max(50).default(20),after:id.optional()}).strict().parse(input);const rows=this.db.query('SELECT body FROM delivery WHERE id>? ORDER BY id LIMIT ?').all(p.after??'',p.limit+1) as {body:string}[];const values=rows.slice(0,p.limit).map(row=>{const r:DeliveryRecord=JSON.parse(row.body);return {id:r.id,pursuitId:r.pursuitId,status:r.status,withdrawn:r.withdrawn,observation:r.observation,cleanup:r.cleanup,needsDecision:!r.withdrawn&&(r.status==='coordinator-ready'||r.receipt?.state==='pending_approval')};});return {items:values,nextCursor:rows.length>p.limit?values.at(-1)!.id:null};}
  detail(idValue:string,access:CoreAccess){owner(access);return this.get(idValue);}
  private async modules():Promise<Module[]> {
   const result:Module[]=[];let cursor:string|undefined;const seen=new Set<string>();
@@ -83,6 +83,24 @@ export class CoreDelivery {
    result.push(...p.items.map(({id,name,status,activeHash})=>({id,name,status,activeHash})));
    if(!p.nextCursor)return result;if(seen.has(p.nextCursor))throw Error('Directory cursor repeated');seen.add(p.nextCursor);cursor=p.nextCursor;
   }throw Error('Directory exceeds bounded scan');
+ }
+ /** Prevent stale candidates overwriting another update, or new targets replacing existing apps. */
+ private assertTargets(items:DeliveryRecord['materials']|DeliveryPrepare['items'],modules:Module[]){
+  for(const item of items){
+   const current=modules.find(m=>m.name===item.name);
+   if(item.baseline){
+    if(!current||current.id!==item.baseline.moduleId||current.activeHash!==item.baseline.expectedActiveHash||current.status!=='active')throw Error(`Update baseline changed: ${item.name}`);
+   }else if(current)throw Error(`Target already exists; an exact update baseline is required: ${item.name}`);
+  }
+ }
+ private assertCurrentTargets(r:DeliveryRecord,modules:Module[]){
+  try{this.assertTargets(r.materials,modules);}
+  catch(error){
+   // A known version conflict invalidates this candidate; it must not block a fresh investigation forever.
+   this.withdraw(r.id,{subject:'delivery-baseline',role:'owner',scopes:[{}]});
+   const withdrawn=this.get(r.id);withdrawn.observation=error instanceof Error?error.message:String(error);this.save(withdrawn);
+   throw error;
+  }
  }
  private authorLive(r:Pick<DeliveryRecord,'author'>,modules:Module[]){if(!modules.some(m=>m.id===r.author.moduleId&&m.name==='author'&&m.status==='active'&&m.activeHash===r.author.hash))throw Error('Original Author identity is no longer active');}
  private guard(p:DeliveryPrepare,access:CoreAccess){this.service.guardAction({pursuitId:p.pursuitId,expectedRevision:p.expectedRevision,expectedVisibilityRevision:p.expectedVisibilityRevision,actionKey:p.actionKey,target:`${p.author.moduleId}.submit`,arguments:command(p)},access);}
@@ -112,7 +130,7 @@ export class CoreDelivery {
   const e=this.options.worker(access.execution.runRef);
   if(!e||e.runId!==access.execution.runRef||e.purpose==='understand'||e.subject!==p.pursuitId||e.revision!==p.expectedRevision||e.visibilityRevision!==p.expectedVisibilityRevision||!e.runId||!e.principal||e.settled||e.ended||e.stopRequested||!['running','waiting'].includes(e.status))throw Error('Actual current worker required');
   this.guard(p,access);const modules=await this.modules();this.authorLive(p,modules);
-  if(p.items.some(i=>modules.some(m=>m.name===i.name)))throw Error('Only NEW capability names are allowed');
+  this.assertTargets(p.items,modules);
   this.guard(p,access); // An async directory read never extends a stale authorization.
   const current=this.options.worker(access.execution.runRef);
   if(!current||current.id!==e.id||current.runId!==e.runId||!same(current.principal,e.principal)||current.settled||current.ended||current.stopRequested)throw Error('Original worker changed during preparation');
@@ -120,7 +138,7 @@ export class CoreDelivery {
   const prior=this.db.query('SELECT body FROM delivery WHERE command_key=?').get(key) as {body:string}|null;
   const basis=this.basis(this.service.detail({kind:'pursuit',id:p.pursuitId},access),access);
   if(prior){const r:DeliveryRecord=JSON.parse(prior.body);if(r.prepareDigest!==coreDigest(p)||r.worker.executionId!==e.id||r.pursuitBasis!==basis||r.withdrawn)throw Error('Original delivery identity conflicts');return {id:r.id,status:r.status};}
-  const r:DeliveryRecord={id:recordId,pursuitId:p.pursuitId,revision:p.expectedRevision,visibilityRevision:p.expectedVisibilityRevision,actionKey:p.actionKey,author:p.author,admissionId:p.admissionId,requestKey:p.requestKey,worker:{executionId:e.id,runId:e.runId,actor:access.execution.actor,principal:e.principal},commandDigest:coreDigest(command(p)),prepareDigest:coreDigest(p),pursuitBasis:basis,materials:p.items.map(({name,materialDigest})=>({name,materialDigest})),payload:p,proof:[],status:'awaiting-worker-proof',withdrawn:false,receipt:null,observation:'waiting for actual settled worker stage proof',directory:[],cleanup:'content retained',updatedAt:this.now()};this.save(r);return {id:r.id,status:r.status};
+  const r:DeliveryRecord={id:recordId,pursuitId:p.pursuitId,revision:p.expectedRevision,visibilityRevision:p.expectedVisibilityRevision,actionKey:p.actionKey,author:p.author,admissionId:p.admissionId,requestKey:p.requestKey,worker:{executionId:e.id,runId:e.runId,actor:access.execution.actor,principal:e.principal},commandDigest:coreDigest(command(p)),prepareDigest:coreDigest(p),pursuitBasis:basis,materials:p.items.map(({name,materialDigest,baseline})=>({name,materialDigest,...(baseline?{baseline}:{})})),payload:p,proof:[],status:'awaiting-worker-proof',withdrawn:false,receipt:null,observation:'waiting for actual settled worker stage proof',directory:[],cleanup:'content retained',updatedAt:this.now()};this.save(r);return {id:r.id,status:r.status};
  }
  /** Trusted settle hook only. Call BEFORE CoreExecutor scrubs Execution.facts.output. */
  async capture(e:Execution):Promise<number>{
@@ -139,7 +157,7 @@ export class CoreDelivery {
  private accept(r:DeliveryRecord,raw:unknown){
   const receipt=deliveryReceiptSchema.parse(raw);
   this.db.transaction(()=>{r=this.get(r.id);
-  if(receipt.admissionId!==r.admissionId||receipt.requestKey!==r.requestKey||!same(receipt.submitter,r.author)||receipt.members.length!==r.materials.length||new Set(receipt.members.map(m=>m.name)).size!==receipt.members.length||receipt.members.some(m=>m.expectedActiveHash!==null||!r.materials.some(i=>i.name===m.name&&i.materialDigest===m.materialDigest)))throw Error('Author receipt does not match original material identity');
+  if(receipt.admissionId!==r.admissionId||receipt.requestKey!==r.requestKey||!same(receipt.submitter,r.author)||receipt.members.length!==r.materials.length||new Set(receipt.members.map(m=>m.name)).size!==receipt.members.length||receipt.members.some(m=>!r.materials.some(i=>i.name===m.name&&i.materialDigest===m.materialDigest&&m.expectedActiveHash===(i.baseline?.expectedActiveHash??null)&&(!i.baseline||m.moduleId===i.baseline.moduleId))))throw Error('Author receipt does not match original material identity');
   if(r.receipt&&!same(immutableReceipt(r.receipt),immutableReceipt(receipt)))throw Error('Immutable receipt identity changed');
   r.receipt=receipt;r.status='submitted';r.observation=receipt.state==='pending_approval'?'pending approval':receipt.state==='rejected'?'candidate rejected':receipt.members.some(m=>['building','testing'].includes(m.status))?'pending checks':'waiting for activation or owner proof';this.save(r);
   }).immediate();
@@ -150,12 +168,12 @@ export class CoreDelivery {
   if(this.inflight.has(r.id))throw Error('Delivery call already in flight');this.inflight.add(r.id);
   try{
    const modules=await this.modules();r=this.get(r.id);this.authorLive(r,modules);this.live(r,access);
-   if(r.materials.some(i=>modules.some(m=>m.name===i.name)))throw Error('Target is no longer NEW');
+   this.assertCurrentTargets(r,modules);
    await this.options.verifyAdmission(structuredClone(r));
    const finalModules=await this.modules();
+   this.assertCurrentTargets(this.get(r.id),finalModules);
    const args=this.db.transaction(()=>{
     r=this.get(r.id);this.authorLive(r,finalModules);this.live(r,access);
-    if(r.materials.some(i=>finalModules.some(m=>m.name===i.name)))throw Error('Target is no longer NEW');
     if(r.withdrawn||r.status!=='coordinator-ready'||!r.payload)throw Error('Delivery withdrawn or changed');
     this.options.assertMaySubmit?.(r.pursuitId);
     if(mayDispatch&&!mayDispatch())throw Error('Automatic submission held by current settings or user control');

@@ -31,6 +31,8 @@
     "core-notifications.ts",
     "core-observation.bun.test.ts",
     "core-observation.ts",
+    "core-organizer.bun.test.ts",
+    "core-organizer.ts",
     "core-reauthorization.bun.test.ts",
     "core-recovery.bun.test.ts",
     "core-recovery.ts",
@@ -64,7 +66,11 @@
   "artifacts": [
     {
       "path": "dist/workspace.js",
-      "sha256": "4194e3beaa5f69e25b47eb8be125aeafe1a910795f62da1859b87c60cf7a8c5f"
+      "sha256": "569ba74e9a511701321fd77d7496a52f5fc56d4fb2243a8f8499bcaf843d6a00"
+    },
+    {
+      "path": "dist/workspace.css",
+      "sha256": "6683c3cadbec8cb8b1dce8d6935bd8583a9cf597ca28a231b83c74ee3b222615"
     }
   ],
   "build": {

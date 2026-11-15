@@ -45,7 +45,8 @@
     "mind.applications",
     "mind.delivery",
     "author.submit",
-    "pi.models"
+    "pi.models",
+    "mind.organized"
   ],
   "data": {
     "schema": 1
@@ -634,7 +635,7 @@
     },
     {
       "name": "delivery",
-      "description": "Current kernel-bound worker: prepare exact NEW Author material with pursuit/revisions, actionKey, author identity, admissionId, requestKey, items (name, dir, intent, materialDigest), criteria; finish for authenticated proof capture. Actual owner/approved Web only: list (limit,after), detail/submit/reconcile/withdraw/forget (id). Explicit submit verifies original admission and stages; unknown replies query the original receipt. Activation never completes the goal. No JSON owner/access fields.",
+      "description": "Prepare exact Author material for new apps or updates (items: name,dir,intent,materialDigest; updates require baseline:{moduleId,expectedActiveHash}). Worker finishes for authenticated proof capture. Owner/Web: list, detail, submit, reconcile, withdraw, forget. Submission verifies exact admission, baseline and material; unknown results query the original receipt. Submission, approval, activation and goal verification are separate. No JSON authority fields.",
       "visibility": [
         "owner",
         "modules"
@@ -665,8 +666,68 @@
       },
       "sideEffects": [
         "Persists exact private delivery preparation and authenticated stage/admission proof",
-        "Only an explicit actual-owner submit transports the original staged material to Author; reconcile reads its original receipt"
+        "The owner or enabled trusted autoSubmit coordinator submits the exact candidate; approval and activation remain separate, reconcile reads the original receipt"
       ]
+    },
+    {
+      "name": "organized",
+      "description": "Return the exact current operation batch summary and triage decision. No mutation or publishing authority.",
+      "visibility": [
+        "modules"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input"
+        ]
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "json"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "observe",
+      "description": "Report this calling application’s bounded operation outcome for optional Mind learning. Caller identity and version are kernel bound; reports never authorize actions.",
+      "visibility": [
+        "modules"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input"
+        ]
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "json": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "json"
+        ],
+        "additionalProperties": false
+      }
     }
   ]
 }

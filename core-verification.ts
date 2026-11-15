@@ -1,3 +1,4 @@
+import {mainModelSelection} from './core-execution';
 import { randomUUID, createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { redactSensitiveText } from './core-redaction';
@@ -71,7 +72,7 @@ export class CoreVerification {
   readonly executor: CoreExecutor;
   constructor(directory: string, private readonly options: VerificationOptions) {
     // Separate filename namespace prevents worker/verifier journal collisions, while sharing kernel's unique queue.
-    this.journal = new CoreExecutionJournal(join(directory, 'verification'));
+    this.journal = new CoreExecutionJournal(join(directory, 'verification'),()=>mainModelSelection(options.store.read().settings));
     this.journal.db.exec(`CREATE TABLE IF NOT EXISTS verification_requests(id TEXT PRIMARY KEY, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS verification_verdicts(request_id TEXT NOT NULL, run_id TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(request_id,run_id));`);
     this.executor = new CoreExecutor(this.journal, options.call, {
