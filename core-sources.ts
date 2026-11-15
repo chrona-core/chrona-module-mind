@@ -405,9 +405,12 @@ export class CoreSources {
 
 /** Applications report only their own bounded operations. Identity/version come from the routed caller. */
 const operationReport = z.object({eventId:z.string().trim().min(1).max(128),operation:z.string().trim().min(1).max(200),outcome:z.enum(['succeeded','failed','unknown']),detail:z.string().max(2000).optional(),page:z.string().max(500).optional()}).strict();
-export function ingestApplicationOperation(store:CoreMindStore,service:SourceIngestor,caller:{moduleId:string;hash:string},input:unknown,at=new Date().toISOString()){
+export function ingestApplicationOperation(
+ store:CoreMindStore,service:SourceIngestor,caller:{moduleId:string;hash:string},input:unknown,at=new Date().toISOString(),
+){
  const report=operationReport.parse(input),sourceIdentity=`application:${caller.moduleId}`;
- const content={text:redactSensitiveText(JSON.stringify({...report,applicationId:caller.moduleId,applicationVersion:caller.hash}),Number.MAX_SAFE_INTEGER),truncated:false};
+ const text=redactSensitiveText(JSON.stringify({...report,applicationId:caller.moduleId,applicationVersion:caller.hash}),Number.MAX_SAFE_INTEGER);
+ const content={text,truncated:false};
  const state=store.read(),previous=state.evidence.find(e=>e.sourceIdentity===sourceIdentity&&e.eventId===report.eventId);
  if(previous){if(previous.retractedAt||previous.expiredAt)throw Error('Operation report was withdrawn or expired');if(previous.content?.text!==content.text)throw Error('Operation event identity already used with different content');return {accepted:true,eventId:report.eventId};}
  const checkpoint=state.checkpoints.find(c=>c.sourceIdentity===sourceIdentity),cursor=String(BigInt(checkpoint?.cursor??'0')+1n);

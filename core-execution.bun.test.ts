@@ -52,3 +52,19 @@ test('visibility withdrawn after a terminal read settles from actual stopped evi
   await ex.reconcile(now);expect(stops).toBe(0);expect(settlements).toBe(1);expect(f.journal.outstanding()).toBeUndefined();
  }finally{f.cleanup();}
 });
+
+for(const purpose of ['organize','opportunity','pursuit'] as const)test(`${purpose} uses its bounded active window and retains occupancy until a confirmed terminal observation`,async()=>{
+ const f=fixture();let active=true,stops=0,settlements=0;try{
+  const call:CoreCall=async target=>{
+   if(target==='agent.run')return {runId:'r',contextId:'c',status:'running',active:true};
+   if(target==='agent.stop'){stops++;return {runId:'r',contextId:'c',status:active?'stopping':'cancelled',active,stopConfirmed:!active};}
+   return {run:{runId:'r',contextId:'c',status:active?'running':'cancelled',active},items:[],ended:!active,nextCursor:null};
+  };
+  f.journal.prepare({...input,purpose},now);const ex=new CoreExecutor(f.journal,call,{current:()=>true,settle:async()=>{settlements++;}});
+  await ex.reconcile(now);await ex.reconcile('2026-11-13T14:03:01.000Z');
+  expect(stops).toBe(purpose==='organize'?1:0);expect(f.journal.outstanding()).toBeDefined();expect(settlements).toBe(0);
+  await ex.reconcile('2026-11-13T14:10:01.000Z');expect(stops).toBeGreaterThan(0);
+  expect(f.journal.outstanding()?.stopConfirmed).toBe(false);expect(()=>f.journal.prepare({...input,purpose},now)).toThrow('Previous execution');
+  active=false;await ex.reconcile('2026-11-13T14:10:02.000Z');expect(settlements).toBe(1);expect(f.journal.outstanding()).toBeUndefined();
+ }finally{f.cleanup();}
+});

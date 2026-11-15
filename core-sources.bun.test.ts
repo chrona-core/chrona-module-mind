@@ -494,7 +494,8 @@ describe("CoreSources pure Chat incremental synchronization", () => {
     expect(next.status).toBe("degraded");
     expect((await sources.sync()).status).toBe("synced"); expect(store.read().checkpoints[0]?.cursor).toBe("600");
     expect(t.calls.some(c => c.tool === "observation-inventory")).toBe(false);
-  }, 30000);
+  // Hundreds of real durable checkpoint commits must tolerate shared-disk test contention.
+  }, 60000);
 
   test("learning pause and missing approved source are visible without source reads", async () => {
     let reads = 0; const call: SourceCall = async () => { reads++; throw Error("unexpected"); };

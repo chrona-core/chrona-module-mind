@@ -3,10 +3,12 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export function mainModelSelection(settings:{mainProviderId?:string;mainModel?:string}) { return {providerId:settings.mainProviderId,model:settings.mainModel}; }
+export function mainModelSelection(settings:{mainProviderId?:string;
+ mainModel?:string}) { return {providerId:settings.mainProviderId,model:settings.mainModel}; }
 
 export type Target = string | { moduleId: string; tool: string };
-export type CoreCall = (target: Target, args: Record<string, unknown>, options?: { key?: string; expectedTarget?: { moduleId: string; hash?: string } }) => Promise<unknown>;
+export type CoreCall = (target: Target, args: Record<string, unknown>, options?: { key?: string;
+  expectedTarget?: { moduleId: string; hash?: string } }) => Promise<unknown>;
 export type ToolFact = { runId: string; callId: string; target: Target; moduleId: string; hash: string; status: string; outputState: string; output?: unknown };
 export type Execution = {
  id: string; purpose: 'understand'|'organize'|'pursuit'|'opportunity'; subject: string; basis?: string; evidenceRefs?: string[]; revision: number; visibilityRevision: number;
@@ -82,7 +84,7 @@ export class CoreExecutor {
    if(hasTerminalObservation(e)&&e.facts.every(f=>f.status!=='unknown')){e.stopConfirmed=true;this.journal.save(e);await this.settle(e);return;}
    if(e.status==='settling'){await this.settle(e);return;}
    const current=this.hooks.current(e);
-   if(!current || e.activityStartedAt && Date.parse(now)-Date.parse(e.activityStartedAt)>(['opportunity','organize'].includes(e.purpose)?180000:600000))e.stopRequested=true;
+   if(!current || e.activityStartedAt && Date.parse(now)-Date.parse(e.activityStartedAt)>(e.purpose==='organize'?180000:600000))e.stopRequested=true;
    if(!e.runId){
     // Even when withdrawn, prepared/unknown requests must query the *original* command identity.
     // Pure prepared commands have no dispatch intent yet and may be cancelled without dispatch.
@@ -109,7 +111,8 @@ export class CoreExecutor {
     if(run.active&&!e.activityStartedAt&&run.status!=='queued')e.activityStartedAt=now;
     for(const item of page.items)this.capture(e,item);
     const next=page.nextCursor as string|null;if(next&&next===e.cursor&&page.items.length)throw Error('Agent observation cursor did not advance');
-    e.cursor=next;e.ended=page.ended;e.active=run.active;if(!run.active)e.terminalStatus=run.status;e.interactions=this.contentCurrent(e)&&Array.isArray(page.interactions)?page.interactions:[];
+    e.cursor=next;
+ e.ended=page.ended;e.active=run.active;if(!run.active)e.terminalStatus=run.status;e.interactions=this.contentCurrent(e)&&Array.isArray(page.interactions)?page.interactions:[];
     e.status=run.status==='unknown'?'unknown':run.active?(e.interactions.length?'waiting':'running'):run.status==='finished'?'finished':'failed';e.error=null;
     if(hasTerminalObservation(e))e.stopConfirmed=true;
     this.journal.save(e);

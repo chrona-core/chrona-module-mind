@@ -12,6 +12,8 @@
     "core-application-integration.bun.test.ts",
     "core-application.bun.test.ts",
     "core-application.ts",
+    "core-artifact.ts",
+    "core-capabilities.bun.test.ts",
     "core-capabilities.ts",
     "core-chat-responsibility.bun.test.ts",
     "core-context.bun.test.ts",
@@ -47,6 +49,7 @@
     "core-store.bun.test.ts",
     "core-store.ts",
     "core-types.ts",
+    "core-verification-artifact.bun.test.ts",
     "core-verification-understanding.bun.test.ts",
     "core-verification.bun.test.ts",
     "core-verification.ts",
@@ -66,7 +69,7 @@
   "artifacts": [
     {
       "path": "dist/workspace.js",
-      "sha256": "569ba74e9a511701321fd77d7496a52f5fc56d4fb2243a8f8499bcaf843d6a00"
+      "sha256": "788eb050f4d0694eab555d21731041f6861607de310ad56dd878358715e64988"
     },
     {
       "path": "dist/workspace.css",

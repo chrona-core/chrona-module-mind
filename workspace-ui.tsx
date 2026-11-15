@@ -113,7 +113,8 @@ function isApplication(value: unknown): value is ApplicationAdapter {
         && value.effect === 'read' && object(value.params) && ['owner', 'builtin'].includes(value.source)
         && (value.revokedAt === undefined || (typeof value.revokedAt === 'string' && value.revokedAt.length > 0));
 }
-const canonicalParams = (value: unknown): string => JSON.stringify(value, (_key, item) => object(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+const canonicalParams = (value: unknown): string => JSON.stringify(value, (_key, item) =>
+    object(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 type WriteRecovery = { args: Data; validate: (result: Data) => void; id: string; onUncertain: () => void };
 type ApplicationWrite = (tool: string, payload: Data, success: string, done?: (result: Data) => void, exactArgs?: boolean, validate?: (result: Data) => void, recovery?: WriteRecovery) => Promise<void>;
 function ApplicationTarget({ adapter }: { adapter: ApplicationGrantInput }) {
@@ -193,7 +194,7 @@ function Applications({ context, busy, uncertain, write, refresh }: { context: M
 }
 // Keep backend dependencies out of the standalone browser bundle. Validate the owner wire projection here.
 type DeliverySummary = Pick<DeliveryRecord, 'id' | 'pursuitId' | 'status' | 'withdrawn' | 'observation' | 'cleanup'>;
-const deliveryStates = ['awaiting-worker-proof', 'coordinator-ready', 'submit-unknown', 'submitted', 'withdrawn'];
+const deliveryStates = ['awaiting-worker-proof', 'coordinator-ready', 'submit-unknown', 'submitted', 'failed', 'rejected', 'withdrawn'];
 const nonempty = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
 const sourceHash = (v: unknown): v is string => typeof v === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(v);
 const materialHash = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
@@ -202,7 +203,7 @@ const sameValue = (a: unknown, b: unknown) => canonicalParams(a) === canonicalPa
 function isDeliverySummary(v: unknown): v is DeliverySummary {
     return object(v) && nonempty(v.id) && nonempty(v.pursuitId) && deliveryStates.includes(v.status) && typeof v.withdrawn === 'boolean' && typeof v.observation === 'string' && typeof v.cleanup === 'string';
 }
-const receiptIdentity = (r: NonNullable<DeliveryRecord['receipt']>) => ({ receiptId: r.receiptId, admissionId: r.admissionId, requestKey: r.requestKey, submitter: r.submitter, members: r.members.map(({ status, selected, ...m }) => m).sort((a, b) => a.name.localeCompare(b.name)) });
+const receiptIdentity = (r: NonNullable<DeliveryRecord['receipt']>) => ({ receiptId: r.receiptId, admissionId: r.admissionId, requestKey: r.requestKey, submitter: r.submitter, members: r.members.map(({ status: _status, selected: _selected, ...m }) => m).sort((a, b) => a.name.localeCompare(b.name)) });
 function deliveryRecord(v: unknown): DeliveryRecord {
     const invalid = () => { throw Error('交付记录或回执身份无效，请重新核对原记录'); };
     if (!isDeliverySummary(v) || Object.keys(v).some(key => !['id', 'pursuitId', 'revision', 'visibilityRevision', 'actionKey', 'author', 'admissionId', 'requestKey', 'worker', 'commandDigest', 'prepareDigest', 'pursuitBasis', 'materials', 'payload', 'proof', 'status', 'withdrawn', 'receipt', 'observation', 'directory', 'cleanup', 'updatedAt'].includes(key))) return invalid();
@@ -214,7 +215,7 @@ function deliveryRecord(v: unknown): DeliveryRecord {
         !Array.isArray(r.proof) || r.proof.some(p => !object(p) || !nonempty(p.callId) || !r.materials.some(m => m.name === p.name && m.materialDigest === p.materialDigest)) || new Set(r.proof.map(p => p.name)).size !== r.proof.length ||
         !Array.isArray(r.directory) || r.directory.some(m => !object(m) || ![m.id, m.name, m.status].every(nonempty) || (m.activeHash !== null && !sourceHash(m.activeHash)))) return invalid();
     if (r.withdrawn ? r.payload !== null : !object(r.payload)) return invalid();
-    if (r.status === 'withdrawn' && (!r.withdrawn || r.receipt !== null) || r.status === 'submitted' && r.receipt === null || ['coordinator-ready', 'awaiting-worker-proof', 'submit-unknown'].includes(r.status) && r.receipt !== null) return invalid();
+    if (r.status === 'withdrawn' && (!r.withdrawn || r.receipt !== null) || ['submitted', 'rejected'].includes(r.status) && r.receipt === null || ['coordinator-ready', 'awaiting-worker-proof', 'submit-unknown', 'failed'].includes(r.status) && r.receipt !== null) return invalid();
     if (r.payload) {
         const p = r.payload;
         if (p.pursuitId !== r.pursuitId || p.expectedRevision !== r.revision || p.expectedVisibilityRevision !== r.visibilityRevision || p.actionKey !== r.actionKey || p.admissionId !== r.admissionId || p.requestKey !== r.requestKey || !sameValue(p.author, r.author) ||
@@ -224,7 +225,7 @@ function deliveryRecord(v: unknown): DeliveryRecord {
     if (r.status === 'coordinator-ready' && (r.withdrawn || r.proof.length !== r.materials.length)) return invalid();
     if (r.receipt !== null) {
         const receipt = r.receipt;
-        if (!object(receipt) || r.status !== 'submitted' || !nonempty(receipt.receiptId) || receipt.admissionId !== r.admissionId || receipt.requestKey !== r.requestKey || !sameValue(receipt.submitter, r.author) || !['submitted', 'pending_approval', 'approved', 'rejected'].includes(receipt.state) || (receipt.approvalId !== null && !nonempty(receipt.approvalId)) ||
+        if (!object(receipt) || !['submitted', 'rejected'].includes(r.status) || (r.status === 'rejected') !== (receipt.state === 'rejected') || !nonempty(receipt.receiptId) || receipt.admissionId !== r.admissionId || receipt.requestKey !== r.requestKey || !sameValue(receipt.submitter, r.author) || !['submitted', 'pending_approval', 'approved', 'rejected'].includes(receipt.state) || (receipt.approvalId !== null && !nonempty(receipt.approvalId)) ||
             !Array.isArray(receipt.members) || receipt.members.length !== r.materials.length || new Set(receipt.members.map(m => m.name)).size !== receipt.members.length || receipt.members.some(m => !object(m) || ![m.moduleId, m.versionId].every(nonempty) || !sourceHash(m.hash) || (m.expectedActiveHash !== null && !sourceHash(m.expectedActiveHash)) || typeof m.selected !== 'boolean' || !['building', 'testing', 'pending_review', 'approved', 'rejected'].includes(m.status) || !r.materials.some(i => i.name === m.name && i.materialDigest === m.materialDigest && m.expectedActiveHash === (i.baseline?.expectedActiveHash ?? null) && (!i.baseline || m.moduleId === i.baseline.moduleId)))) return invalid();
     }
     return r;
@@ -236,10 +237,10 @@ function matchDelivery(result: unknown, original: DeliveryRecord, operation: 'su
         (original.withdrawn && !r.withdrawn) || (!r.withdrawn && !sameValue(r.payload, original.payload)) ||
         (original.receipt && (!r.receipt || !sameValue(receiptIdentity(original.receipt), receiptIdentity(r.receipt))))) throw Error('交付回复与审阅的原始材料或回执不一致');
     if (original.status === 'submit-unknown' && !r.receipt && r.status !== 'submit-unknown') throw Error('原提交仍未知，必须保留同一回执的核对入口');
-    if (operation === 'submit' && (!r.receipt || r.status !== 'submitted') || operation === 'withdraw' && (!r.withdrawn || r.payload !== null) || operation === 'reconcile' && (original.status === 'submit-unknown' || original.receipt) && !r.receipt && r.status !== 'submit-unknown') throw Error('交付结果尚未得到原回执确认');
+    if (operation === 'submit' && (!r.receipt || !['submitted', 'rejected'].includes(r.status)) || operation === 'withdraw' && (!r.withdrawn || r.payload !== null) || operation === 'reconcile' && (original.status === 'submit-unknown' || original.receipt) && !r.receipt && r.status !== 'submit-unknown') throw Error('交付结果尚未得到原回执确认');
     return r;
 }
-const deliveryLabel = (r: DeliverySummary) => r.withdrawn ? (r.status === 'submit-unknown' ? '已撤回，原提交仍未知' : '已撤回') : ({ 'awaiting-worker-proof': '等待材料证明', 'coordinator-ready': '等待你审阅提交', 'submit-unknown': '原提交结果未知', submitted: '已有提交回执', withdrawn: '已撤回' }[r.status]);
+const deliveryLabel = (r: DeliverySummary) => r.withdrawn ? (r.status === 'submit-unknown' ? '已撤回，原提交仍未知' : '已撤回') : ({ 'awaiting-worker-proof': '等待材料证明', 'coordinator-ready': '等待你审阅提交', 'submit-unknown': '原提交结果未知', submitted: '已有提交回执', failed: '提交失败', rejected: '交付已被拒绝', withdrawn: '已撤回' }[r.status]);
 const receiptLabel: Record<string, string> = { submitted: '已提交', pending_approval: '等待审批', approved: '已批准', rejected: '已拒绝', building: '正在构建', testing: '正在检查', pending_review: '等待审阅' };
 function DeliveryMaterial({ record: r }: { record: DeliveryRecord }) {
     return <><p className="mind-tag">{deliveryLabel(r)}</p>

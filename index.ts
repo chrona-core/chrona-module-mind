@@ -5,6 +5,7 @@ import {CoreMindStore,coreDigest} from './core-store';
 import {CoreMindService} from './core-service';
 import {CoreRuntime,deliveryRuntimeHooks} from './core-runtime';
 import {CoreActions} from './core-actions';
+import {artifactToolResult} from './core-artifact';
 import {CoreApplication} from './core-application';
 import {CoreDelivery} from './core-delivery';
 import {CoreDeliveryAdmission} from './core-delivery-admission';
@@ -118,9 +119,15 @@ on('tool',async event=>{
     result={...overview,health:runtime.view(),notifications:notifications.view(),budget:runtime.view().budget,sources:store.read().checkpoints,deliveries:who.role==='owner'?delivery.list({limit:50},who).items:[],applications:runtime.capabilities?.modules.map(m=>({id:m.id,name:m.name,activeHash:m.activeHash??null}))??[],autonomousPublishing:runtime.view().autonomousPublishing,recovery:recovery.status()};break;
    }
    case 'detail':{
-    const id=String(a.id??''),state=store.read();const kind=state.pursuits.some(p=>p.id===id)?'pursuit':state.understandings.some(u=>u.id===id)?'understanding':'evidence';
-    const detail=service.detail({kind,id},who),refs='evidenceRefs'in detail?detail.evidenceRefs:'supportingRefs'in detail?[...detail.supportingRefs,...detail.opposingRefs]:[];
-    result={...detail,evidence:refs.map(id=>service.detail({kind:'evidence',id},who)).filter(e=>!e.retractedAt),artifacts:kind==='pursuit'?actions.list(id,who).map(d=>actions.read(d.ref,who)):[]};break;
+    const id=String(a.id??''),state=store.read();
+    const kind=state.pursuits.some(p=>p.id===id)?'pursuit':state.understandings.some(u=>u.id===id)?'understanding':'evidence';
+    const detail=service.detail({kind,id},who);
+    const refs='evidenceRefs'in detail?detail.evidenceRefs:'supportingRefs'in detail?[...detail.supportingRefs,...detail.opposingRefs]:[];
+    const artifacts=kind==='pursuit'?actions.list(id,who):[];
+    // Agent tool results have a bounded journal; read document bodies through artifact.
+    result={...detail,evidence:refs.map(id=>service.detail({kind:'evidence',id},who)).filter(e=>!e.retractedAt),
+     artifacts:who.role==='owner'?artifacts.map(d=>actions.read(d.ref,who)):artifacts};
+    break;
    }
    case 'recovery':{result=a.input===undefined?recovery.status():recovery.review(input(a) as never,who);break;}
    case 'settings':{
@@ -176,9 +183,19 @@ on('tool',async event=>{
      else throw new ModelError('invalid','Expected delivery operation prepare, list, detail, submit, reconcile, withdraw or forget');
     }break;
    }
-   case 'action':{const mutation=input(a);if(typeof mutation.pursuitId==='string'&&runtime.pendingControl(mutation.pursuitId))throw new ModelError('conflict','A pending user control is being checked; guarded effects are held');await runtime.bindResponsibility();const bound=access(event.caller,event.id,event.call?.executionRunId);result=mutation.target==='application-read'?await actions.applicationRead(mutation as never,bound):actions.create(mutation as never,bound);break;}
+   case 'action':{
+    const mutation=input(a);
+    if(typeof mutation.pursuitId==='string'&&runtime.pendingControl(mutation.pursuitId))throw new ModelError('conflict','A pending user control is being checked; guarded effects are held');
+    await runtime.bindResponsibility();
+    const bound=access(event.caller,event.id,event.call?.executionRunId);
+    const outcome=mutation.target==='application-read'?await actions.applicationRead(mutation as never,bound):actions.create(mutation as never,bound);
+    result='body' in outcome?artifactToolResult(outcome):outcome;
+    break;
+   }
    case 'artifact':{
-    const document=actions.read(String(a.ref),who);service.detail({kind:'pursuit',id:document.pursuitId},who);result=document;break;
+    const document=actions.read(String(a.ref),who);
+    result=who.role==='owner'&&a.offset===undefined?document:artifactToolResult(document,a.offset as number|undefined);
+    break;
    }
    case 'check':if(who.role!=='owner')throw new ModelError('forbidden','Only the owner can manually check');result=await background(true);break;
   }
