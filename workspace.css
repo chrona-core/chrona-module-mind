@@ -543,17 +543,12 @@
 
 .mind-root .mind-deliveries { margin-top: 2rem; min-width: 0; }
 .mind-root .mind-delivery-review { margin-top: 1rem; padding: 1rem; border: 1px solid var(--mind-border, #d4d8dd); border-radius: 12px; min-width: 0; }
-.mind-root .mind-delivery-facts { display: grid; grid-template-columns: minmax(7rem, 1fr) minmax(0, 3fr); gap: .5rem 1rem; }
-.mind-root .mind-delivery-facts dt { font-weight: 600; }
-.mind-root .mind-delivery-facts dd { margin: 0; }
-.mind-root .mind-deliveries code, .mind-root .mind-delivery-facts dd, .mind-root .mind-delivery-material { overflow-wrap: anywhere; word-break: break-word; }
+.mind-root .mind-deliveries code, .mind-root .mind-delivery-material { overflow-wrap: anywhere; word-break: break-word; }
 .mind-root .mind-delivery-material { padding: .75rem 0; border-top: 1px solid var(--mind-border, #d4d8dd); }
 .mind-root .mind-delivery-review h5 { font-size: 1rem; margin: 1rem 0 .5rem; }
 .mind-root .mind-delivery-confirm { padding: 1rem; margin-top: 1rem; background: var(--mind-surface, #f5f7fa); border-radius: 8px; }
 .mind-root .mind-deliveries [hidden] { display: none; }
 @media (max-width: 600px) {
-    .mind-root .mind-delivery-facts { grid-template-columns: minmax(0, 1fr); gap: .25rem; }
-    .mind-root .mind-delivery-facts dd { margin-bottom: .75rem; }
     .mind-root .mind-delivery-review, .mind-root .mind-delivery-confirm { padding: .75rem; }
 }
 
@@ -562,3 +557,5 @@
 .mind-root select {max-inline-size:100%;min-inline-size:0;padding:8px;border:1px solid var(--mind-line);border-radius:8px;background:white;color:var(--mind-ink)}
 .mind-root .mind-source-settings {margin-block:24px}
 @media(forced-colors:active) {.mind-root [aria-current=page],.mind-root [aria-pressed=true] {outline:2px solid Highlight}}
+
+.mind-root .mind-technical {margin-block:12px;padding-top:10px}

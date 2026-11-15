@@ -44,11 +44,14 @@ const owner = (a: CoreAccess) => { if (a.role !== 'owner') throw Error('Owner co
 const command = (p: DeliveryPrepare) => ({ admissionId: p.admissionId, requestKey: p.requestKey, items: p.items.map(({name,dir,intent}) => ({name,dir,intent})) });
 const target = (r: DeliveryRecord, tool: string) => ({ moduleId: r.author.moduleId, tool });
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
-// A real service.release changes only these three fields; releasing the finished worker
-// must not invalidate an otherwise identical handoff or reserve worker concurrency.
+// Bind delivery to intent and authority, independently of progress and responsibility bookkeeping.
 const pursuitBasis = (
- {revision:_revision,updatedAt:_updatedAt,currentActor:_currentActor,...basis}:Pursuit, understandings:Understanding[],
-) => coreDigest(understandings.length ? {pursuit:basis,understandings} : basis);
+ {id,semanticKey,goal,completionCriteria,scope,reason,evidenceRefs,understandingRefs,suppression,visibilityRevision}:Pursuit, understandings:Understanding[],
+) => coreDigest({
+ pursuit:{id,semanticKey,goal,completionCriteria,scope,reason,evidenceRefs,understandingRefs,suppression,visibilityRevision},
+ understandings:understandings.map(({id,kind,value,scope,explicitness,supportingRefs,opposingRefs,status,visibilityRevision,expiresAt,suppression})=>
+  ({id,kind,value,scope,explicitness,supportingRefs,opposingRefs,status,visibilityRevision,expiresAt,suppression})),
+});
 const immutableReceipt = (r: Receipt) => ({
  receiptId:r.receiptId, admissionId:r.admissionId, requestKey:r.requestKey, submitter:r.submitter,
  members:r.members.map(({status:_status,selected:_selected,...m})=>m).sort((a,b)=>a.name.localeCompare(b.name)),
@@ -135,8 +138,8 @@ export class CoreDelivery {
  }
  private live(r:DeliveryRecord,access:CoreAccess){
   const s=this.service.store.read();const p=this.service.detail({kind:'pursuit',id:r.pursuitId},access) as Pursuit;
-  const held=p.revision===r.revision&&p.currentActor?.actor===r.worker.actor&&p.currentActor.runRef===r.worker.runId;
-  const released=p.revision===r.revision+1&&!p.currentActor;
+  const held=p.currentActor?.actor===r.worker.actor&&p.currentActor.runRef===r.worker.runId;
+  const released=!p.currentActor;
   if(!s.settings.enabled||s.settings.restoreBlocked||s.visibilityRevision!==r.visibilityRevision||(!held&&!released)||this.basis(p,access)!==r.pursuitBasis||p.paused||['done','ended'].includes(p.status)||p.currentActor?.stopRequested)throw Error('Pursuit authorization or visibility changed');
  }
  async prepare(input:unknown,access:CoreAccess){

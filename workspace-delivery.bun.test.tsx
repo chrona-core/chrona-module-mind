@@ -28,12 +28,12 @@ async function click(name: string) { button(name).click(); await new Promise(r =
 async function confirm() { container.querySelector<HTMLInputElement>('.mind-delivery-confirm input[type=checkbox]')!.click(); await new Promise(r => setTimeout(r, 8)); }
 type Input = { operation: string; id?: string; after?: string; limit?: number };
 type Recorded = { tool: string; args: Record<string, any> };
-async function start(delivery: (input: Input) => unknown | Promise<unknown>) {
+async function start(delivery: (input: Input) => unknown | Promise<unknown>, pursuits: unknown[] = []) {
     const calls: Recorded[] = [];
     container = window.document.createElement('div') as unknown as HTMLElement; window.document.body.append(container as any);
     const call: MindContext['call'] = async (tool, args) => {
         calls.push({ tool, args: structuredClone(args) });
-        if (tool === 'overview') return envelope({ items: [], visibilityRevision: 7, settings: { learningEnabled: true } });
+        if (tool === 'overview') return envelope({ items: pursuits, visibilityRevision: 7, settings: { learningEnabled: true } });
         if (tool === 'context') return envelope({ understandings: [] });
         if (tool === 'applications') return envelope([]);
         if (tool === 'delivery') return delivery(JSON.parse(args.input));
@@ -245,3 +245,28 @@ test('generic compacted outcome envelope cannot skip the delivery receipt callba
     await wait(() => !!container.querySelector(`[aria-label="审阅交付 ${record.id}"]`)); await submitReview(); await wait(() => visible().includes('原提交的结果尚不确定'));
     expect(buttons().some(b => b.textContent?.trim() === '确认提交精确材料')).toBe(false); expect(effects(calls)).toHaveLength(1); expect(visible()).not.toContain('原请求已有回执，但相关内容已清理或压缩');
 });
+
+for (const status of ['coordinator-ready', 'failed', 'rejected'] as const) {
+    test(`${status} delivery keeps its task title and expandable identity`, async () => {
+        const goal = `改进 应用中心：改善应用列表的布局与操作\n反馈对应版本：${'a'.repeat(40)}；应用：a72dc177-cd15-47fa-9335-18e2ec58e4c2`;
+        const title = '改进 应用中心：改善应用列表的布局与操作';
+        const record = status === 'rejected' ? rejected() : { ...prepared(), status };
+        const calls = await start(p => envelope(p.operation === 'list' ? { items: [summary(record)], nextCursor: null } : record), [{ id: record.pursuitId, goal, status: 'waiting', waitFor: 'user' }]);
+        await wait(() => !!container.querySelector(`[aria-label="审阅交付 ${record.id}"]`));
+        const card = container.querySelector(`[aria-label="审阅交付 ${record.id}"]`)!.closest('article')!;
+        expect(card.querySelector('h4')?.textContent).toBe(title);
+        const technical = card.querySelector('details')!;
+        expect(technical.open).toBe(false);
+        technical.querySelector('summary')!.click();
+        expect(technical.open).toBe(true);
+        expect(technical.textContent).toContain(record.id);
+        expect(technical.textContent).toContain(record.pursuitId);
+        await open();
+        expect(container.querySelector('.mind-delivery-review h4')?.textContent).toBe(`${title} · 改动与检查`);
+        const details = container.querySelector<HTMLDetailsElement>('.mind-delivery-review details')!;
+        expect(details.open).toBe(false);
+        expect(details.textContent).toContain(record.worker.runId);
+        expect(details.textContent).toContain(record.requestKey);
+        expect(effects(calls)).toEqual([]);
+    });
+}

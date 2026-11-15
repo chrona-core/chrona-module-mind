@@ -1,12 +1,15 @@
 import {expect,test} from 'bun:test';
 import {Database} from 'bun:sqlite';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,readFileSync,readdirSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {CoreMindStore} from './core-store';
 import {CoreMindService} from './core-service';
 import {CoreActions} from './core-actions';
-import {CoreRuntime,RUNTIME_ACCESS} from './core-runtime';
+import {CoreRuntime,RUNTIME_ACCESS,type RuntimeHooks} from './core-runtime';
+import {readCapabilities,selectMindTools} from './core-capabilities';
+import {mindPromptDelivery,type DeliveryOutcome} from './core-prompt';
+import {publicSystemTools} from '../../system/tool-contract-declarations';
 import {CoreObservationCoordinator} from './core-observation';
 import type {CoreAccess} from './core-types';
 import type {CoreCall,CoreExecutionJournal,Execution,ToolFact} from './core-execution';
@@ -21,8 +24,9 @@ class Fixture {
  now='2026-11-13T10:00:00.000Z';hash='tools-v1';reverse=false;loseReply=false;directoryCalls=0;readCalls=0;keys:string[]=[];
  failDescription=false;obsoleteContext=false;holdDirectory?:Promise<void>;directoryPages=1;
  selected='';store!:CoreMindStore;service!:CoreMindService;actions!:CoreActions;runtime!:CoreRuntime;
- constructor(){this.gateway.exec('CREATE TABLE runs(key TEXT PRIMARY KEY,json TEXT NOT NULL)');this.open();}
- open(){this.store=new CoreMindStore(this.directory);this.service=new CoreMindService(this.store,{now:()=>this.now});this.actions=new CoreActions(this.directory,this.service);this.runtime=new CoreRuntime(this.store,this.service,this.call,()=>identity,this.actions,()=>this.now);}
+ directorySnapshot?:Awaited<ReturnType<typeof readCapabilities>>;
+ constructor(private readonly hooks:RuntimeHooks={}){this.gateway.exec('CREATE TABLE runs(key TEXT PRIMARY KEY,json TEXT NOT NULL)');this.open();}
+ open(){this.store=new CoreMindStore(this.directory);this.service=new CoreMindService(this.store,{now:()=>this.now});this.actions=new CoreActions(this.directory,this.service);this.runtime=new CoreRuntime(this.store,this.service,this.call,()=>identity,this.actions,()=>this.now,this.hooks);}
  restart(){this.runtime.close();this.actions.close();this.store.close();this.open();}
  close(){this.runtime.close();this.actions.close();this.store.close();this.gateway.close();rmSync(this.directory,{recursive:true,force:true});}
  advance(ms:number){this.now=new Date(Date.parse(this.now)+ms).toISOString();}
@@ -34,6 +38,8 @@ class Fixture {
  control(operation:'pause'|'resume',key:string=operation){return this.service.control({actionKey:key,expectedRevision:this.pursuit.revision,expectedVisibilityRevision:this.store.read().visibilityRevision,kind:'pursuit',id:this.pursuit.id,operation},owner);}
  readonly call:CoreCall=async(target,args,options)=>{
   if(this.obsoleteContext&&(target==='agent.stop'||target==='agent.read'))throw Error('Obsolete context unavailable');
+  if(target==='modules.list'&&this.directorySnapshot)return {items:this.directorySnapshot.modules,nextCursor:null};
+  if(target==='modules.describe'&&this.directorySnapshot)return {items:this.directorySnapshot.tools,nextCursor:null};
   if(target==='modules.list'){this.directoryCalls++;await this.holdDirectory;const items=[{id:identity.moduleId,name:'mind',hash:identity.hash},{id:'installed-app',name:'author',hash:this.hash}];return {items:this.reverse?items.reverse():items,nextCursor:this.directoryPages>1&&!args.cursor?'page-2':null};}
   if(target==='modules.describe'){this.directoryCalls++;if(this.failDescription)throw Error('Directory unavailable');return {items:[{target:{moduleId:'installed-app',tool:'read'},description:'Read current prepared material'}],nextCursor:null};}
   if(target==='agent.run'){
@@ -445,5 +451,132 @@ test('capability changes do not release a permission wait; owner resume does',as
   f.finish('failed');await f.runtime.tick();f.restart();f.hash='new-tool-version';f.advance(60000);await f.runtime.tick();
   expect(f.pursuit.waitFor).toBe('permission');expect(f.runs()).toHaveLength(1);
   f.control('resume');await f.runtime.tick();expect(f.runs()).toHaveLength(2);
+ }finally{f.close();}
+});
+
+/** Real checked-in descriptions, including irrelevant owner settings/secrets, rather than padded text. */
+async function largeDirectory(){
+ const modules:Record<string,unknown>[]=[],items:{target:Parameters<CoreCall>[0];description:string}[]=[];
+ const external=new URL('../',import.meta.url);
+ for(const folder of readdirSync(external)){
+  const file=new URL(`${folder}/module.json`,external);
+  if(!await Bun.file(file).exists())continue;
+  const manifest=JSON.parse(readFileSync(file,'utf8')) as {name:string;description:string;tools:{name:string;description:string;visibility?:string[]}[]};
+  const moduleId=manifest.name==='mind'?identity.moduleId:manifest.name==='author'?'installed-app':`installed-${manifest.name}`;
+  modules.push({id:moduleId,name:manifest.name,description:manifest.description,status:'active',activeHash:'a'.repeat(40),hash:'a'.repeat(40),builtin:false,
+   versions:[{hash:'a'.repeat(40),status:'active',createdAt:'2026-11-13T09:00:00.000Z',errors:null,git:null}],runs:[]});
+  for(const tool of manifest.tools??[])if((tool.visibility??['owner']).some(v=>v==='owner'||v==='provider'))items.push({target:{moduleId,tool:tool.name},description:tool.description});
+ }
+ for(const [module,tools] of Object.entries(publicSystemTools))for(const tool of tools)
+  if(tool.visibility.some(v=>v==='owner'||v==='provider'))items.push({target:`${module}.${tool.name}`,description:tool.description});
+ return readCapabilities(async target=>{
+  if(target==='modules.list')return {items:modules,nextCursor:null};
+  if(target==='modules.describe')return {items,nextCursor:null};
+  throw Error(`Unexpected fixture directory call ${JSON.stringify(target)}`);
+ });
+}
+
+function deliveryOutcome(pursuitId:string,worker:DeliveryOutcome['worker']):DeliveryOutcome{
+ const material={name:'timetable',materialDigest:'b'.repeat(64),baseline:{moduleId:'existing-timetable',expectedActiveHash:'c'.repeat(40)}};
+ return {id:'existing-delivery',pursuitId,worker,status:'submitted',observation:'Original receipt pending user approval',actionKey:'original-prepare-key',
+  author:{moduleId:'installed-app',hash:'a'.repeat(40)},admissionId:'original-admission',requestKey:'original-submit-key',materials:[material],updatedAt:'2026-11-13T10:00:00.000Z',
+  payload:{pursuitId,expectedRevision:1,expectedVisibilityRevision:0,actionKey:'original-prepare-key',author:{moduleId:'installed-app',hash:'a'.repeat(40)},admissionId:'original-admission',requestKey:'original-submit-key',
+   items:[{...material,dir:'packages/timetable-update/source',intent:{changes:['Fix noon arrival parsing'],preserves:['Existing journeys and data']}}],criteria:['A usable result']},
+  receipt:{receiptId:'original-receipt',admissionId:'original-admission',requestKey:'original-submit-key',submitter:{moduleId:'installed-app',hash:'a'.repeat(40)},state:'pending_approval',approvalId:'approval-id',
+   members:[{name:material.name,moduleId:'existing-timetable',hash:'d'.repeat(40),versionId:'candidate-version',expectedActiveHash:material.baseline.expectedActiveHash,materialDigest:material.materialDigest,status:'pending_review',selected:false}]},
+  directory:[{id:'existing-timetable',name:'timetable',status:'active',activeHash:material.baseline.expectedActiveHash}]};
+}
+
+/** Reconstruct the old serialization with otherwise identical evidence, artifacts and prompt instructions. */
+function oldPromptSize(prompt:string,directory:Awaited<ReturnType<typeof readCapabilities>>,deliveries:DeliveryOutcome[],understand=false){
+ const marker=understand?'\nContext/data:\n':'\nData:\n',offset=prompt.lastIndexOf(marker);
+ const data=JSON.parse(prompt.slice(offset+marker.length));
+ data.capabilities=understand?directory.tools:directory;
+ if(!understand)data.continuation.deliveries=deliveries.map(({actionKey:_actionKey,author:_author,directory:_directory,...original})=>original);
+ const instructions=prompt.slice(0,offset).replace(/continuation\.deliveries contains existing owner-recorded status[^\n]*\n/,'');
+ return (instructions+marker+JSON.stringify(data)).length;
+}
+
+for(const mode of ['understand','pursuit'] as const)test(`large directory ${mode} prompts retain executable discovery and real context with fewer characters`,async()=>{
+ let deliveries:DeliveryOutcome[]=[];
+ const f=new Fixture({deliveryOutcomes:()=>deliveries});try{
+  f.directorySnapshot=await largeDirectory();
+  if(mode==='understand')f.service.ingest({sourceIdentity:'real-chat',epoch:'one',expectedCheckpointRevision:0,nextCursor:'2',scopeRevision:1,capturedAt:f.now,coverage:{complete:true},events:[
+   {id:'user-request',eventId:'user-request',cursor:'1',object:{kind:'message',id:'user-request',revision:1},kind:'message',actor:'user',scope:{sessionId:'real-task'},origin:{rootId:'real-task'},occurredAt:f.now,receivedAt:f.now,scopeRevision:1,content:{text:'Fix the timetable app: the noon arrival is wrong. Preserve my saved journeys.',truncated:false}},
+   {id:'foreground-ended',eventId:'foreground-ended',cursor:'2',object:{kind:'execution',id:'real-task',revision:1},kind:'operation',actor:'application',scope:{sessionId:'real-task'},origin:{rootId:'real-task'},occurredAt:f.now,receivedAt:f.now,scopeRevision:1,content:{text:JSON.stringify({foregroundActive:false,pendingCommand:false,terminalConfirmed:true}),truncated:false}}
+  ]},RUNTIME_ACCESS);
+  else f.goal();
+  await f.runtime.tick(true);
+  const measurements:{stage:number;before:number;after:number}[]=[];
+  for(let stage=1;stage<=(mode==='understand'?1:3);stage++){
+   const run=f.runs().at(-1)!,prompt=String(run.args.prompt),directory=f.runtime.capabilities!;
+   const data=JSON.parse(prompt.split(mode==='understand'?'\nContext/data:\n':'\nData:\n').at(-1)!);
+   expect(run.args.tools).toEqual(selectMindTools(directory.tools,identity.moduleId,mode));
+   const describedTargets=[...data.capabilities.system.map((t:{target:string})=>t.target),
+    ...data.capabilities.modules.flatMap((m:{moduleId:string;tools:{name:string}[]})=>m.tools.map(t=>({moduleId:m.moduleId,tool:t.name})))];
+   expect(describedTargets.map(t=>JSON.stringify(t)).sort()).toEqual((run.args.tools as Parameters<CoreCall>[0][]).map(t=>JSON.stringify(t)).sort());
+   expect(run.args.tools).toContain('modules.list');expect(run.args.tools).toContain('modules.describe');expect(run.args.tools).toContain('modules.receipt');
+   const serialized=JSON.stringify(data.capabilities);
+   expect(serialized).not.toContain('secrets.');expect(serialized).not.toContain('settings.');expect(serialized).not.toContain('installed-qq');
+   const author=data.capabilities.modules.find((m:{moduleId:string})=>m.moduleId==='installed-app');
+   if(mode==='understand'){
+    expect(author).toBeUndefined();expect(data.evidence.some((e:{content?:{text:string}})=>e.content?.text.includes('Preserve my saved journeys'))).toBe(true);
+    expect(data.evidence.every((e:{id:string})=>!!e.id)).toBe(true);expect(data.actionInputGuide.pursue.evidenceRefs).toBeDefined();
+   }else{
+    for(const tool of ['import','validate','read','stage','receipt'])expect(author.tools.some((t:{name:string})=>t.name===tool)).toBe(true);
+    expect(author.metadata.hash).toBe('a'.repeat(40));expect(author.tools.some((t:{name:string})=>t.name==='submit')).toBe(false);
+    expect(data.capabilities.modules.find((m:{moduleId:string})=>m.moduleId===identity.moduleId).tools.some((t:{name:string})=>t.name==='artifact')).toBe(true);
+    expect(data.pursuit.id).toBe(f.pursuit.id);expect(data.pursuit.goal).toBe('Prepare a useful result');
+    if(stage>1){
+     expect(data.continuation.failure).toContain('Worker ended with failed status');expect(data.continuation.artifacts[0].body).toContain('/workspace/train-app');
+     expect(data.continuation.candidates[0].originalReceiptRef).toBe(`stage-${stage-1}:document`);
+     const outcome=data.continuation.deliveries[0];
+     expect(outcome.actionKey).toBe('original-prepare-key');expect(outcome.requestKey).toBe('original-submit-key');expect(outcome.receipt.receiptId).toBe('original-receipt');
+     expect(outcome.materials[0]).toMatchObject({dir:'packages/timetable-update/source',materialDigest:'b'.repeat(64),baseline:{moduleId:'existing-timetable',expectedActiveHash:'c'.repeat(40)}});
+     expect(outcome.receipt.members[0]).toMatchObject({moduleId:'existing-timetable',hash:'d'.repeat(40),versionId:'candidate-version',selected:stage===3});
+     expect(outcome.directory[0].activeHash).toBe(stage===3?'d'.repeat(40):'c'.repeat(40));expect(outcome.payload).toBeUndefined();
+    }
+   }
+   const before=oldPromptSize(prompt,directory,deliveries,mode==='understand');measurements.push({stage,before,after:prompt.length});
+   expect(prompt.length).toBeLessThan(before*.55);
+   if(mode==='pursuit'&&stage<3){
+    f.checkpoint(`/workspace/train-app/src/index.ts: implemented parser step ${stage}; actual noon-boundary assertion still fails. Preserve existing material and fix conversion.`,`stage-${stage}`);
+    const execution=f.runtime.journal.outstanding()!;
+    deliveries=[deliveryOutcome(f.pursuit.id,{executionId:execution.id,runId:run.runId,actor:'mind',principal:identity})];
+    if(stage===2){deliveries[0].receipt!.state='approved';deliveries[0].receipt!.members[0]!.selected=true;deliveries[0].receipt!.members[0]!.status='approved';deliveries[0].directory[0]!.activeHash='d'.repeat(40);deliveries[0].observation='Exact candidate is active; original usable-result criterion still needs checking';}
+    f.finish('failed');await f.runtime.tick();f.restart();f.advance(stage===1?60000:300000);await f.runtime.tick();
+    expect(f.runs()).toHaveLength(stage+1);
+   }
+  }
+  console.info(JSON.stringify({fixture:'checked-in user-visible tool descriptions',mode,modules:f.directorySnapshot.modules.length,capabilities:f.directorySnapshot.tools.length,characters:measurements}));
+ }finally{f.close();}
+});
+
+for(const status of ['awaiting-worker-proof','coordinator-ready','submit-unknown','failed'] as const)test(`delivery prompt retains ${status} facts without inventing a submission receipt`,()=>{
+ const original=deliveryOutcome('pursuit',{executionId:'original-execution',runId:'original-run',actor:'mind',principal:identity});
+ original.status=status;original.receipt=null;original.directory=[];
+ original.observation=status==='failed'?'Validation failed: missing compiled timetable handler':`Actual delivery status: ${status}`;
+ const context=mindPromptDelivery(original);
+ expect(context.status).toBe(status);expect(context.observation).toBe(original.observation);expect(context.receipt).toBeNull();
+ expect(context.admissionId).toBe('original-admission');expect(context.requestKey).toBe('original-submit-key');expect(context.actionKey).toBe('original-prepare-key');
+ expect(context.worker.runId).toBe('original-run');expect(context.author).toEqual(original.author);
+ expect(context.materials[0]).toMatchObject({name:'timetable',dir:'packages/timetable-update/source',materialDigest:'b'.repeat(64)});
+ original.payload=null;
+ expect(mindPromptDelivery(original).materials[0]).not.toHaveProperty('dir');
+});
+
+test('continuation retains older withdrawn unknown submission identities beyond recent delivery history',async()=>{
+ let deliveries:DeliveryOutcome[]=[];
+ const f=new Fixture({deliveryOutcomes:()=>deliveries});try{
+  const pursuit=f.goal();
+  deliveries=Array.from({length:7},(_,i)=>({...deliveryOutcome(pursuit.id,{executionId:'prior-'+i,runId:'prior-run-'+i,actor:'mind',principal:identity}),
+   id:'delivery-'+i,requestKey:'original-key-'+i,admissionId:'admission-'+i,updatedAt:`2026-11-13T09:0${i}:00.000Z`}));
+  Object.assign(deliveries[0]!,{status:'submit-unknown',withdrawn:true,receipt:null,payload:null});
+  await f.runtime.tick(true);
+  const data=JSON.parse(String(f.runs()[0]!.args.prompt).split('\nData:\n').at(-1)!);
+  expect(data.continuation.deliveries).toHaveLength(7);
+  expect(data.continuation.deliveries).toContainEqual(expect.objectContaining({
+   id:'delivery-0',status:'submit-unknown',withdrawn:true,requestKey:'original-key-0',admissionId:'admission-0'
+  }));
  }finally{f.close();}
 });
