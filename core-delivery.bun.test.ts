@@ -9,6 +9,7 @@ import { CoreExecutionJournal, type CoreCall } from './core-execution';
 import type { CoreAccess, Pursuit } from './core-types';
 import { candidateReceiptSchema } from '../../../../../../contracts/src/steward/module-candidates';
 import { parseSubmit, parseReceipt } from '../author/contracts';
+import { assertInterleavedSettlementConverges } from '../../__testing__/state-machine-invariants';
 const owner:CoreAccess={subject:'owner',role:'owner',scopes:[{}]};
 const author={moduleId:'author-id',hash:'a'.repeat(40)}, principal={moduleId:'mind-id',hash:'b'.repeat(40)};
 function fixture(){
@@ -19,15 +20,15 @@ function fixture(){
  const claimed=service.claim({pursuitId:p.id,expectedRevision:p.revision,expectedVisibilityRevision:0,actionKey:'claim'},worker).value as Pursuit;e.revision=claimed.revision;journal.save(e);
  const input:DeliveryPrepare={pursuitId:p.id,expectedRevision:claimed.revision,expectedVisibilityRevision:0,actionKey:'delivery',author,admissionId:'admission',requestKey:'stable-command',items:[{name:'calendar',dir:'packages/calendar-stage/source',intent:{changes:['private-intent-marker'],preserves:[]},materialDigest:'c'.repeat(64)}],criteria:['private-criteria-marker']};
  const receipt:ReturnType<typeof candidateReceiptSchema.parse>={receiptId:'real-receipt',admissionId:input.admissionId,requestKey:input.requestKey,submitter:author,state:'pending_approval',approvalId:'approval',members:[{name:'calendar',moduleId:'calendar-id',hash:'d'.repeat(40),versionId:'version',expectedActiveHash:null,materialDigest:input.items[0]!.materialDigest,status:'pending_review',selected:false}]};
- const state={authorHash:author.hash,submits:0,receiptQueries:[] as unknown[],lost:false,admission:true,active:false,badReceipt:false,baseline:null as null|string,hold:undefined as undefined|(()=>Promise<void>)};
+ const state={authorHash:author.hash,submits:0,receiptQueries:[] as unknown[],lost:false,admission:true,active:false,badReceipt:false,baseline:null as null|string,submitError:undefined as Error|undefined,receiptError:undefined as Error|undefined,hold:undefined as undefined|(()=>Promise<void>)};
  const calls:{target:unknown;args:Record<string,unknown>;key?:string}[]=[];
  const call:CoreCall=async(target,args,options)=>{
   calls.push({target,args,key:options?.key});
   if(target==='modules.list')return {items:[{id:author.moduleId,name:'author',status:'active',activeHash:state.authorHash},...(state.baseline?[{id:'calendar-id',name:'calendar',status:'active',activeHash:state.baseline}]:[]),...(state.active?[{id:'calendar-id',name:'calendar',status:'active',activeHash:'d'.repeat(40)}]:[])],nextCursor:null};
   if(typeof target==='object'&&target.moduleId===author.moduleId&&target.tool==='submit'){
-   expect(options?.expectedTarget).toEqual({moduleId:author.moduleId,hash:author.hash});state.submits++;expect(parseSubmit(JSON.parse(args.input as string))).toEqual({admissionId:input.admissionId,requestKey:input.requestKey,items:input.items.map(({name,dir,intent})=>({name,dir,intent}))});expect(options?.key).toBe(input.requestKey);await state.hold?.();if(state.lost)throw Error('lost reply');return structuredClone(receipt);
+   expect(options?.expectedTarget).toEqual({moduleId:author.moduleId,hash:author.hash});state.submits++;expect(parseSubmit(JSON.parse(args.input as string))).toEqual({admissionId:input.admissionId,requestKey:input.requestKey,items:input.items.map(({name,dir,intent})=>({name,dir,intent}))});expect(options?.key).toBe(input.requestKey);await state.hold?.();if(state.submitError)throw state.submitError;if(state.lost)throw Error('lost reply');return structuredClone(receipt);
   }
-  if(target==='modules.receipt'){const selector='receiptId'in args?{receiptId:args.receiptId}:{admissionId:args.admissionId,requestKey:args.key};parseReceipt(selector);state.receiptQueries.push(selector);return {...structuredClone(receipt),...(state.badReceipt?{receiptId:'other-receipt'}:{})};}
+  if(target==='modules.receipt'){const selector='receiptId'in args?{receiptId:args.receiptId}:{admissionId:args.admissionId,requestKey:args.key};parseReceipt(selector);state.receiptQueries.push(selector);if(state.receiptError)throw state.receiptError;return {...structuredClone(receipt),...(state.badReceipt?{receiptId:'other-receipt'}:{})};}
   throw Error('Unexpected bounded call');
  };
  let submitGate:((pursuitId:string)=>void)|undefined;let admissionWait:(()=>Promise<void>)|undefined;
@@ -74,6 +75,9 @@ test('fresh submit blocks stale authorization, changed Author identity, denied a
  for(const kind of ['visibility','revision','disabled','author','admission','expired']){const f=fixture();try{const r=await f.delivery.prepare(f.input,f.worker);await f.stage(r.id);
   if(kind==='author')f.state.authorHash='e'.repeat(40);else if(kind==='admission')f.state.admission=false;else f.store.update(tx=>{if(kind==='visibility'){const m=tx.meta();m.visibilityRevision++;tx.setMeta(m);}if(kind==='disabled'){const s=tx.settings();s.enabled=false;tx.setSettings(s);}if(kind==='revision'){const p=tx.get('pursuit',f.input.pursuitId)!;p.revision++;tx.put('pursuit',p);}if(kind==='expired'){const e=tx.list('evidence')[0]!;e.expiredAt=new Date().toISOString();tx.put('evidence',e);}});
   await expect(f.delivery.submit(r.id,owner)).rejects.toThrow();expect(f.state.submits).toBe(0);
+  expect(f.delivery.detail(r.id,owner).status).toBe('failed');expect(f.delivery.pendingFor(f.input.pursuitId)).toBe(false);
+  expect(f.delivery.list({},owner).items[0]).toMatchObject({status:'failed',needsDecision:false,observation:expect.stringContaining('before dispatch')});
+  f.reopen();expect(f.delivery.pendingFor(f.input.pursuitId)).toBe(false);expect((await f.delivery.submit(r.id,owner)).status).toBe('failed');expect(f.state.submits).toBe(0);
  }finally{f.cleanup();}}
 });
 test('real responsibility release permits owner handoff; a new claim blocks fresh submission',async()=>{
@@ -125,4 +129,142 @@ test('an existing name without baseline and mismatched update receipt are reject
   f.input.items[0]!.baseline={moduleId:'calendar-id',expectedActiveHash:f.state.baseline};const r=await f.delivery.prepare(f.input,f.worker);await f.stage(r.id);
   await expect(f.delivery.submit(r.id,owner)).rejects.toThrow('receipt does not match');expect(f.delivery.detail(r.id,owner).status).toBe('submit-unknown');
  }finally{f.cleanup();}
+});
+
+test('pre-dispatch failure preserves its reason through restart and scrubs details on forget', async () => {
+ const f=fixture();try{
+  const {id}=await f.delivery.prepare(f.input,f.worker);await f.stage(id);
+  const reason=`${f.input.items[0]!.dir}: private-intent-marker`;
+  f.setAdmissionWait(async()=>{throw Error(reason);});
+  await expect(f.delivery.submit(id,owner)).rejects.toThrow(reason);f.reopen();
+  expect(f.delivery.detail(id,owner)).toMatchObject({status:'failed',receipt:null,observation:expect.stringContaining(reason)});
+  expect(f.delivery.pendingFor(f.input.pursuitId)).toBe(false);
+  const calls=f.calls.length;
+  expect((await f.delivery.submit(id,owner)).status).toBe('failed');
+  expect((await f.delivery.reconcile(id,owner)).status).toBe('failed');expect(f.calls).toHaveLength(calls);
+  f.delivery.forget(id,owner);f.reopen();
+  expect(f.delivery.detail(id,owner)).toMatchObject({status:'failed',payload:null,withdrawn:true,observation:'withdrawn; submission failed before dispatch'});
+  expect(readFileSync(join(f.dir,'mind-delivery.sqlite')).includes(Buffer.from('private-intent-marker'))).toBe(false);
+ }finally{f.cleanup();}
+});
+
+test.each(['invalid','forbidden','not_found','conflict','unavailable','cycle','failed','unknown'])(
+ 'SDK %s error after dispatch and a missing receipt never prove no effect', async code => {
+  const f = fixture();
+  try {
+   const { id } = await f.delivery.prepare(f.input, f.worker);await f.stage(id);
+   // ModelError's public shape has only code, reason and message. The same shape
+   // describes both a routing refusal and a handler/replay error after publication.
+   f.state.submitError = Object.assign(Error('submission refused before receipt'), {code,reason:'unsupported'});
+   await expect(f.delivery.submit(id, owner)).rejects.toThrow('submission refused');
+   f.reopen();
+   expect(f.delivery.detail(id, owner)).toMatchObject({status:'submit-unknown',observation:expect.stringContaining('submission refused')});
+   f.state.receiptError = Object.assign(Error('receipt absent at this instant'), {code:'not_found'});
+   await expect(f.delivery.submit(id, owner)).rejects.toThrow('receipt absent');
+   expect(f.delivery.pendingFor(f.input.pursuitId)).toBe(true);
+   expect(f.state.submits).toBe(1);
+   f.reopen();f.state.receiptError = undefined;
+   const recovered = await f.delivery.reconcile(id, owner);
+   expect(recovered.receipt).toEqual(f.receipt);expect(f.state.submits).toBe(1);
+   expect(f.state.receiptQueries).toEqual(Array(2).fill({admissionId:'admission',requestKey:'stable-command'}));
+  } finally { f.cleanup(); }
+ },
+);
+
+test.each([
+ {state:'submitted',member:'building',selected:false,active:false,status:'submitted',pending:true},
+ {state:'pending_approval',member:'pending_review',selected:false,active:false,status:'submitted',pending:true},
+ {state:'approved',member:'approved',selected:false,active:false,status:'submitted',pending:true},
+ {state:'approved',member:'approved',selected:true,active:true,status:'submitted',pending:false},
+ {state:'rejected',member:'rejected',selected:false,active:false,status:'rejected',pending:false},
+] as const)('receipt $state/$member derives $status and pending=$pending', async row => {
+ const f = fixture();
+ try {
+  const { id } = await f.delivery.prepare(f.input, f.worker);await f.stage(id);
+  f.receipt.state = row.state;f.receipt.members[0]!.status = row.member;f.receipt.members[0]!.selected = row.selected;
+  await f.delivery.submit(id, owner);f.state.active = row.active;
+  const result = await f.delivery.reconcile(id, owner);
+  expect(result.status).toBe(row.status);expect(f.delivery.pendingFor(f.input.pursuitId)).toBe(row.pending);
+  f.reopen();expect(f.delivery.detail(id, owner).status).toBe(row.status);
+  if (row.status === 'rejected') {
+   const calls = f.calls.length;
+   expect(f.delivery.list({}, owner).items[0]).toMatchObject({needsDecision:false,observation:'candidate rejected'});
+   await f.delivery.submit(id, owner);await f.delivery.reconcile(id, owner);
+   expect(f.calls).toHaveLength(calls);
+  }
+ } finally { f.cleanup(); }
+});
+
+test('a late preflight failure cannot overwrite another coordinator receipt or unknown dispatch', async () => {
+ for (const lost of [false, true]) {
+  const f = fixture();let other: CoreDelivery | undefined;
+  try {
+   const { id } = await f.delivery.prepare(f.input, f.worker);await f.stage(id);
+   let release!: () => void, entered!: () => void;
+   const started = new Promise<void>(resolve => entered = resolve);
+   f.setAdmissionWait(async () => { entered();await new Promise<void>(resolve => release = resolve);throw Error('late admission refusal'); });
+   const pending = f.delivery.submit(id, owner);
+   await started;
+   other = new CoreDelivery(f.dir, f.service, f.call, {worker:run => f.journal.all().find(e => e.runId === run),verifyAdmission:async () => {}});
+   f.state.lost = lost;
+   if (lost) await expect(other.submit(id, owner)).rejects.toThrow('lost reply');
+   else await other.submit(id, owner);
+   release();await expect(pending).rejects.toThrow('late admission refusal');
+   expect(f.delivery.detail(id, owner).status).toBe(lost ? 'submit-unknown' : 'submitted');
+   expect(f.delivery.pendingFor(f.input.pursuitId)).toBe(true);expect(f.state.submits).toBe(1);
+  } finally { other?.close();f.cleanup(); }
+ }
+});
+
+test('final Author validation fails durably when admission awaits a directory change',async()=>{
+ const f=fixture();try{
+  const {id}=await f.delivery.prepare(f.input,f.worker);await f.stage(id);
+  f.setAdmissionWait(async()=>{f.state.authorHash='9'.repeat(40);});
+  await expect(f.delivery.submit(id,owner)).rejects.toThrow('Author');
+  f.reopen();expect(f.delivery.detail(id,owner).status).toBe('failed');
+  expect(f.delivery.pendingFor(f.input.pursuitId)).toBe(false);expect(f.state.submits).toBe(0);
+ }finally{f.cleanup();}
+});
+
+test.each([false,true])('forget scrubs private error details even when an exception arrives late (dispatched=%s)',async dispatched=>{
+ const f=fixture();try{
+  const {id}=await f.delivery.prepare(f.input,f.worker);await f.stage(id);
+  const privateReason=`${f.input.items[0]!.dir}: private-intent-marker`;
+  let release!:()=>void,entered!:()=>void;
+  const started=new Promise<void>(resolve=>entered=resolve);
+  const wait=async()=>{entered();await new Promise<void>(resolve=>release=resolve);throw Error(privateReason);};
+  if(dispatched)f.state.hold=wait;else f.setAdmissionWait(wait);
+  const pending=f.delivery.submit(id,owner);await started;
+  f.delivery.forget(id,owner);release();await expect(pending).rejects.toThrow(privateReason);
+  f.delivery.cleanupWithdrawn();f.reopen();
+  const record=f.delivery.detail(id,owner);expect(record.payload).toBeNull();expect(record.withdrawn).toBe(true);
+  expect(record.observation).not.toContain(privateReason);
+  expect(readFileSync(join(f.dir,'mind-delivery.sqlite')).includes(Buffer.from('private-intent-marker'))).toBe(false);
+ }finally{f.cleanup();}
+});
+
+test('withdrawal interleaved with a preflight refusal converges without resurrecting a blocker', async () => {
+ const fixtures: ReturnType<typeof fixture>[] = [];
+ try {
+  await assertInterleavedSettlementConverges({
+   beginRequest: async () => {
+    const f = fixture();fixtures.push(f);
+    const { id } = await f.delivery.prepare(f.input, f.worker);await f.stage(id);
+    let release!: () => void, entered!: () => void;
+    const started = new Promise<void>(resolve => entered = resolve);
+    f.setAdmissionWait(async () => { entered();await new Promise<void>(resolve => release = resolve);throw Error('admission refused'); });
+    const pending = f.delivery.submit(id, owner);
+    await started;
+    return {f,id,pending,release};
+   },
+   enterWaiting: async ({f,id}) => { f.delivery.withdraw(id, owner); },
+   resolveExternally: async ({release,pending}) => { release();await expect(pending).rejects.toThrow('admission refused'); },
+   readFinalState: async ({f,id}) => {
+    f.delivery.cleanupWithdrawn();f.reopen();
+    const r = f.delivery.detail(id, owner);
+    return {withdrawn:r.withdrawn,payload:r.payload,pending:f.delivery.pendingFor(f.input.pursuitId)};
+   },
+   isStuckWaiting: state => state.pending,
+  });
+ } finally { for (const f of fixtures) f.cleanup(); }
 });

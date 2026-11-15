@@ -36,6 +36,8 @@
     "mind.artifact",
     "author.prepare",
     "author.export",
+    "author.import",
+    "author.validate",
     "author.read",
     "author.write",
     "author.list",
@@ -450,7 +452,7 @@
     },
     {
       "name": "artifact",
-      "description": "Read exact persisted local document content and digest; original pursuit access remains required.",
+      "description": "Read persisted artifact content and digest. Large results return an artifact-manifest; pass offset:0 and follow nextOffset until null to read all chunks. Offsets count UTF-16 code units. Original pursuit access remains required.",
       "visibility": [
         "owner",
         "modules"
@@ -461,6 +463,9 @@
         "properties": {
           "ref": {
             "type": "string"
+          },
+          "offset": {
+            "type": "number"
           }
         },
         "required": [

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { coreDigest, type CoreMindStore } from './core-store';
 import type { Evidence } from './core-types';
-import type { CoreExecutionJournal, Execution } from './core-execution';
+import type { CoreExecutionJournal, Execution, ToolFact } from './core-execution';
 
 const resultSchema = z.object({
  evidenceRefs:z.array(z.string().min(1).max(128)).min(1).max(50),
@@ -25,16 +25,27 @@ export class CoreOrganizer {
  settle(e:Execution,at:string){
   if(e.visibilityRevision!==this.store.read().visibilityRevision)return;
   let result:Organized|undefined;
-  if(e.terminalStatus==='finished'&&!e.stopRequested)for(const fact of e.facts){
-   if(fact.runId!==e.runId||fact.moduleId!==e.principal?.moduleId||fact.hash!==e.principal.hash||typeof fact.target==='string'||fact.target.tool!=='organized'||fact.status!=='succeeded'||fact.outputState!=='complete')continue;
-   const output=fact.output&&typeof fact.output==='object'&&'json'in fact.output?JSON.parse(String(fact.output.json)):fact.output;
-   const parsed=resultSchema.safeParse(output);
-   if(parsed.success&&coreDigest([...parsed.data.evidenceRefs].sort())===coreDigest([...(e.evidenceRefs??[])].sort()))result={...parsed.data,at,visibilityRevision:e.visibilityRevision};
-  }
+  if(e.terminalStatus==='finished'&&!e.stopRequested)result=this.selectedResult(e,at);
   // Failure never silently discards input or retries the same small-model stage forever.
   if(!result)console.error(JSON.stringify({component:'mind',event:'organizer_fallback',runId:e.runId,error:`Organizer ended ${e.terminalStatus??e.status} without a complete grounded result`}));
   result??={evidenceRefs:e.evidenceRefs??[],summary:'整理未成功，交由主模型核对原始记录。',decision:'uncertain',at,visibilityRevision:e.visibilityRevision};
   this.journal.db.query('INSERT OR REPLACE INTO runtime_organized(id,json) VALUES(?,?)').run(e.id,JSON.stringify(result));
+ }
+ private isSelectedResult(fact:ToolFact,e:Execution){
+  return fact.runId===e.runId&&fact.moduleId===e.principal?.moduleId&&fact.hash===e.principal.hash
+   &&typeof fact.target!=='string'&&fact.target.tool==='organized'&&fact.status==='succeeded'&&fact.outputState==='complete';
+ }
+ private selectedResult(e:Execution,at:string){
+  let result:Organized|undefined;
+  for(const fact of e.facts){
+   if(!this.isSelectedResult(fact,e))continue;
+   const output=fact.output&&typeof fact.output==='object'&&'json'in fact.output?JSON.parse(String(fact.output.json)):fact.output;
+   const parsed=resultSchema.safeParse(output);
+   if(!parsed.success)continue;
+   if(coreDigest([...parsed.data.evidenceRefs].sort())!==coreDigest([...(e.evidenceRefs??[])].sort()))continue;
+   result={...parsed.data,at,visibilityRevision:e.visibilityRevision};
+  }
+  return result;
  }
  route(refs:Evidence[],at:string,manual:boolean){
   if(!this.store.read().settings.organizerModel)return {ready:refs,unorganized:[],summaries:[]};

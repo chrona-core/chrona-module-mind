@@ -9,7 +9,9 @@ import type { CoreCall, Execution } from './core-execution';
 
 const id = z.string().min(1).max(128), hash = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
 const identity = z.object({ moduleId: id, hash }).strict();
-const intent = z.object({ changes: z.array(z.string().trim().min(1).max(500)).min(1).max(20), preserves: z.array(z.string().trim().min(1).max(500)).max(20) }).strict();
+const intent = z.object({
+ changes: z.array(z.string().trim().min(1).max(500)).min(1).max(20), preserves: z.array(z.string().trim().min(1).max(500)).max(20)
+}).strict();
 const name = z.string().regex(/^[a-z][a-z0-9-]{1,40}$/).refine(n => !['self','core','agent'].includes(n), 'Reserved target');
 const baseline = z.object({ moduleId: id, expectedActiveHash: hash }).strict();
 const item = z.object({ name, baseline: baseline.optional(), dir: z.string().regex(/^packages\/[a-z][a-z0-9-]{0,63}\/source$/).max(180), intent, materialDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
@@ -25,7 +27,7 @@ export type DeliveryRecord = {
  worker: {executionId: string; runId: string; actor: string; principal: {moduleId: string; hash: string}};
  commandDigest: string; prepareDigest: string; pursuitBasis: string; materials: {name: string; materialDigest: string; baseline?: {moduleId: string; expectedActiveHash: string}}[];
  payload: DeliveryPrepare | null; proof: {name: string; callId: string; materialDigest: string}[];
- status: 'awaiting-worker-proof' | 'coordinator-ready' | 'submit-unknown' | 'submitted' | 'withdrawn';
+ status: 'awaiting-worker-proof' | 'coordinator-ready' | 'submit-unknown' | 'submitted' | 'failed' | 'rejected' | 'withdrawn';
  withdrawn: boolean; receipt: Receipt | null; observation: string; directory: Module[]; cleanup: string; updatedAt: string;
 };
 export type DeliveryOptions = {
@@ -44,8 +46,20 @@ const target = (r: DeliveryRecord, tool: string) => ({ moduleId: r.author.module
 const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
 // A real service.release changes only these three fields; releasing the finished worker
 // must not invalidate an otherwise identical handoff or reserve worker concurrency.
-const pursuitBasis = ({revision,updatedAt,currentActor,...basis}:Pursuit, understandings:Understanding[]) => coreDigest(understandings.length ? {pursuit:basis,understandings} : basis);
-const immutableReceipt = (r: Receipt) => ({ receiptId:r.receiptId, admissionId:r.admissionId, requestKey:r.requestKey, submitter:r.submitter, members:r.members.map(({status,selected,...m})=>m).sort((a,b)=>a.name.localeCompare(b.name)) });
+const pursuitBasis = (
+ {revision:_revision,updatedAt:_updatedAt,currentActor:_currentActor,...basis}:Pursuit, understandings:Understanding[],
+) => coreDigest(understandings.length ? {pursuit:basis,understandings} : basis);
+const immutableReceipt = (r: Receipt) => ({
+ receiptId:r.receiptId, admissionId:r.admissionId, requestKey:r.requestKey, submitter:r.submitter,
+ members:r.members.map(({status:_status,selected:_selected,...m})=>m).sort((a,b)=>a.name.localeCompare(b.name)),
+});
+const terminalFailure = (r: DeliveryRecord) => r.status === 'failed' || r.status === 'rejected';
+const blocksPursuit = (r: DeliveryRecord) => !r.withdrawn && !terminalFailure(r) && r.receipt?.state !== 'rejected' && !r.receipt?.members.every(m => m.selected && r.directory.some(d => d.id === m.moduleId && d.activeHash === m.hash && d.status === 'active'));
+const errorReason = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 2000);
+const failUndispatched = (r: DeliveryRecord, error: unknown) => {
+ if(r.withdrawn || r.status !== 'coordinator-ready' || r.receipt)return false;
+ r.status='failed';r.observation=`submission failed before dispatch: ${errorReason(error)}`;return true;
+};
 
 /** Private handoff ledger, not another executor or lifecycle queue. Submission is shared by owner review and the trusted runtime coordinator. */
 export class CoreDelivery {
@@ -60,7 +74,7 @@ export class CoreDelivery {
  }
  close(){this.db.close();}
  /** Coordinator waits reserve no executor lane; activated exact targets may resume the original goal. */
- pendingFor(pursuitId:string){return (this.db.query('SELECT body FROM delivery').all() as {body:string}[]).some(row=>{const r:DeliveryRecord=JSON.parse(row.body);return r.pursuitId===pursuitId&&!r.withdrawn&&r.receipt?.state!=='rejected'&&!(r.receipt?.members.every(m=>m.selected&&r.directory.some(d=>d.id===m.moduleId&&d.activeHash===m.hash&&d.status==='active')));});}
+ pendingFor(pursuitId:string){return (this.db.query('SELECT body FROM delivery').all() as {body:string}[]).some(row=>{const r:DeliveryRecord=JSON.parse(row.body);return r.pursuitId===pursuitId&&blocksPursuit(r);});}
  cleanupWithdrawn(){
   let deferred=0;
   for(const row of this.db.query('SELECT body FROM delivery').all() as {body:string}[]){
@@ -149,7 +163,7 @@ export class CoreDelivery {
   for(const row of rows){const r:DeliveryRecord=JSON.parse(row.body);if(r.status!=='awaiting-worker-proof'||r.withdrawn||!r.payload||r.worker.executionId!==e.id||r.worker.runId!==e.runId||!same(r.worker.principal,e.principal))continue;
    this.authorLive(r,modules);this.live(r,{subject:'delivery-settle',role:'runtime',scopes:[{}]});
    const selected=e.tools.some(t=>same(t,target(r,'stage')));if(!selected)continue;
-   const proofs=r.payload.items.map(i=>{const f=e.facts.find(f=>f.runId===e.runId&&f.moduleId===r.author.moduleId&&f.hash===r.author.hash&&same(f.target,target(r,'stage'))&&f.status==='succeeded'&&f.outputState==='complete'&&!!f.output&&typeof f.output==='object'&&same({name:(f.output as any).name,dir:(f.output as any).dir,materialDigest:(f.output as any).materialDigest},{name:i.name,dir:i.dir,materialDigest:i.materialDigest}));return f?{name:i.name,callId:f.callId,materialDigest:i.materialDigest}:null;});
+   const proofs=r.payload.items.map(i=>{const f=e.facts.find(f=>f.runId===e.runId&&f.moduleId===r.author.moduleId&&f.hash===r.author.hash&&same(f.target,target(r,'stage'))&&f.status==='succeeded'&&f.outputState==='complete'&&!!f.output&&typeof f.output==='object'&&same({name:(f.output as Record<string,unknown>).name,dir:(f.output as Record<string,unknown>).dir,materialDigest:(f.output as Record<string,unknown>).materialDigest},{name:i.name,dir:i.dir,materialDigest:i.materialDigest}));return f?{name:i.name,callId:f.callId,materialDigest:i.materialDigest}:null;});
    if(proofs.some(p=>p===null))continue;
    captured+=this.db.transaction(()=>{const fresh=this.get(r.id);if(fresh.withdrawn||fresh.status!=='awaiting-worker-proof')return 0;fresh.proof=proofs as DeliveryRecord['proof'];fresh.status='coordinator-ready';fresh.observation='stage proven; waiting for independent owner admission verification';this.save(fresh);return 1;}).immediate();
   }return captured;
@@ -159,33 +173,72 @@ export class CoreDelivery {
   this.db.transaction(()=>{r=this.get(r.id);
   if(receipt.admissionId!==r.admissionId||receipt.requestKey!==r.requestKey||!same(receipt.submitter,r.author)||receipt.members.length!==r.materials.length||new Set(receipt.members.map(m=>m.name)).size!==receipt.members.length||receipt.members.some(m=>!r.materials.some(i=>i.name===m.name&&i.materialDigest===m.materialDigest&&m.expectedActiveHash===(i.baseline?.expectedActiveHash??null)&&(!i.baseline||m.moduleId===i.baseline.moduleId))))throw Error('Author receipt does not match original material identity');
   if(r.receipt&&!same(immutableReceipt(r.receipt),immutableReceipt(receipt)))throw Error('Immutable receipt identity changed');
-  r.receipt=receipt;r.status='submitted';r.observation=receipt.state==='pending_approval'?'pending approval':receipt.state==='rejected'?'candidate rejected':receipt.members.some(m=>['building','testing'].includes(m.status))?'pending checks':'waiting for activation or owner proof';this.save(r);
+  r.receipt=receipt;r.status=receipt.state==='rejected'?'rejected':'submitted';r.observation=receipt.state==='pending_approval'?'pending approval':receipt.state==='rejected'?'candidate rejected':receipt.members.some(m=>['building','testing'].includes(m.status))?'pending checks':'waiting for activation or owner proof';this.save(r);
+  }).immediate();
+ }
+ /** Only a locally undispatched command can be failed from an exception. SDK error
+  * codes/reasons omit delivery provenance and also describe handler/replay errors. */
+ private failBeforeSubmit(idValue:string,error:unknown){
+  this.db.transaction(()=>{
+   const current=this.get(idValue);
+   // Another coordinator may have dispatched while this one awaited its checks.
+   if(failUndispatched(current,error))this.save(current);
   }).immediate();
  }
  async submit(idValue:string,access:CoreAccess,mayDispatch?:()=>boolean){
-  owner(access);let r=this.get(idValue);if(r.status==='submit-unknown'||r.receipt)return this.reconcile(idValue,access);
+  owner(access);let r=this.get(idValue);if(terminalFailure(r))return r;if(r.status==='submit-unknown'||r.receipt)return this.reconcile(idValue,access);
   if(r.withdrawn||r.status!=='coordinator-ready'||!r.payload||r.proof.length!==r.materials.length)throw Error('Actual worker stage proof required');
   if(this.inflight.has(r.id))throw Error('Delivery call already in flight');this.inflight.add(r.id);
   try{
-   const modules=await this.modules();r=this.get(r.id);this.authorLive(r,modules);this.live(r,access);
-   this.assertCurrentTargets(r,modules);
-   await this.options.verifyAdmission(structuredClone(r));
-   const finalModules=await this.modules();
-   this.assertCurrentTargets(this.get(r.id),finalModules);
-   const args=this.db.transaction(()=>{
-    r=this.get(r.id);this.authorLive(r,finalModules);this.live(r,access);
-    if(r.withdrawn||r.status!=='coordinator-ready'||!r.payload)throw Error('Delivery withdrawn or changed');
+   let finalModules:Module[];
+   try{
+    const modules=await this.modules();r=this.get(r.id);this.authorLive(r,modules);this.live(r,access);
+    this.assertCurrentTargets(r,modules);
+    await this.options.verifyAdmission(structuredClone(r));
+    finalModules=await this.modules();
+    this.assertCurrentTargets(this.get(r.id),finalModules);
+   }catch(error){this.failBeforeSubmit(r.id,error);throw error;}
+   const prepared=this.db.transaction(()=>{
+    r=this.get(r.id);
+    let original:ReturnType<typeof command>;
+    try{
+     this.authorLive(r,finalModules);this.live(r,access);
+     if(r.withdrawn||r.status!=='coordinator-ready'||!r.payload)throw Error('Delivery withdrawn or changed');
+     original=command(r.payload);if(coreDigest(original)!==r.commandDigest)throw Error('Original command changed');
+    }catch(error){
+     if(failUndispatched(r,error))this.save(r);
+     return {error}; // Commit the failure before propagating it outside the transaction.
+    }
     this.options.assertMaySubmit?.(r.pursuitId);
     if(mayDispatch&&!mayDispatch())throw Error('Automatic submission held by current settings or user control');
-    const original=command(r.payload);if(coreDigest(original)!==r.commandDigest)throw Error('Original command changed');
-    r.status='submit-unknown';r.observation='original submit outcome unknown; exact receipt query required';this.save(r);return original;
+    r.status='submit-unknown';r.observation='original submit outcome unknown; exact receipt query required';this.save(r);return {original};
    }).immediate();
-   const raw=await this.call(target(r,'submit'),{input:JSON.stringify(args)},{key:r.requestKey,expectedTarget:{moduleId:r.author.moduleId,hash:r.author.hash}});
+   if('error'in prepared)throw prepared.error;
+   let raw:unknown;
+   try{
+    raw=await this.call(target(r,'submit'),{input:JSON.stringify(prepared.original)},{key:r.requestKey,expectedTarget:{moduleId:r.author.moduleId,hash:r.author.hash}});
+   }catch(error){
+    const failure=error as {code?:string;reason?:string}|null;
+    const refused=failure?.reason==='not_dispatched'&&failure.code==='unavailable'
+     ||failure?.reason==='submission_refused'&&['invalid','forbidden','not_found','unavailable'].includes(failure.code??'');
+    this.db.transaction(()=>{
+     const current=this.get(r.id);
+     if(!current.receipt&&current.status==='submit-unknown'){
+      if(refused)current.status='failed';
+      current.observation=current.withdrawn
+       ?refused?'withdrawn; submission refused before acceptance':'withdrawn; original submit still unknown; receipt reconciliation retained'
+       :refused?`submission refused before acceptance: ${errorReason(error)}`:`original submit outcome unknown; exact receipt query required: ${errorReason(error)}`;
+      this.save(current);
+     }
+    }).immediate();
+    throw error;
+   }
+   // A malformed reply can follow acceptance; it is never a refusal attestation.
    this.accept(this.get(r.id),raw);return this.get(r.id);
   }finally{this.inflight.delete(r.id);}
  }
  async reconcile(idValue:string,access:CoreAccess){
-  owner(access);let r=this.get(idValue);if(!r.receipt&&r.status!=='submit-unknown')return r;
+  owner(access);let r=this.get(idValue);if(terminalFailure(r)||(!r.receipt&&r.status!=='submit-unknown'))return r;
   // The approved owner coordinator reads the fixed kernel receipt independently of
   // the submitter's current version. Never replay the original submission here.
   const selector=r.receipt?{receiptId:r.receipt.receiptId}:{admissionId:r.admissionId,key:r.requestKey};
@@ -201,8 +254,8 @@ export class CoreDelivery {
  /** Owner forget adapter uses the same erasure path. Unknown commands remain queryable. */
  forget(idValue:string,access:CoreAccess){return this.withdraw(idValue,access);}
  withdraw(idValue:string,access:CoreAccess){
-  owner(access);this.db.transaction(()=>{const r=this.get(idValue);r.withdrawn=true;r.payload=null;if(r.status!=='submit-unknown'&&!r.receipt)r.status='withdrawn';
-  r.observation=r.status==='submit-unknown'?'withdrawn; original submit still unknown; receipt reconciliation retained':'withdrawn; original receipt identity retained';r.cleanup=this.inflight.has(r.id)?'deferred: original call arguments remain in flight':'source paths, intents and criteria removed; content-free reconciliation identity retained';this.save(r);
+  owner(access);this.db.transaction(()=>{const r=this.get(idValue);r.withdrawn=true;r.payload=null;if(!terminalFailure(r)&&r.status!=='submit-unknown'&&!r.receipt)r.status='withdrawn';
+  r.observation=r.status==='failed'?'withdrawn; submission failed before dispatch':r.status==='rejected'?'withdrawn; candidate rejected':r.status==='submit-unknown'?'withdrawn; original submit still unknown; receipt reconciliation retained':'withdrawn; original receipt identity retained';r.cleanup=this.inflight.has(r.id)?'deferred: original call arguments remain in flight':'source paths, intents and criteria removed; content-free reconciliation identity retained';this.save(r);
   return r;
   }).immediate();return this.checkpointWithdrawal(idValue);
  }

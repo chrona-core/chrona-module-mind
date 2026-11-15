@@ -65,6 +65,67 @@ test('loading, empty, list error and pagination use the actual owner wire', asyn
     expect(calls.filter(c => c.tool === 'delivery').at(-1)?.args).toEqual({ input: JSON.stringify({ operation: 'list', limit: 20, after: 'delivery-001' }) }); expect(effects(calls)).toEqual([]);
 });
 
+for (const [status, label] of [['failed', '提交失败'], ['rejected', '交付已被拒绝']] as const) {
+    test(`${status} delivery summaries show a meaningful Chinese status`, async () => {
+        const record: DeliveryRecord = { ...prepared(), status };
+        const calls = await start(() => envelope({ items: [summary(record)], nextCursor: null }));
+        await wait(() => !!container.querySelector(`[aria-label="审阅交付 ${record.id}"]`));
+        const row = container.querySelector(`[aria-label="审阅交付 ${record.id}"]`)!.closest('article')!;
+        expect(row.textContent).toContain(label);
+        expect(effects(calls)).toEqual([]);
+    });
+}
+
+function rejected(original = prepared()): DeliveryRecord {
+    const record = submitted(original);
+    record.status = 'rejected';
+    record.receipt!.state = 'rejected';
+    record.receipt!.members[0]!.status = 'rejected';
+    return record;
+}
+
+test('rejected detail renders the original receipt and reconciles without offering submission', async () => {
+    const record = rejected();
+    const calls = await start(p => envelope(p.operation === 'list' ? { items: [summary(record)], nextCursor: null } : record));
+    await wait(() => !!container.querySelector(`[aria-label="审阅交付 ${record.id}"]`));
+    await open();
+    expect(visible()).toContain('交付已被拒绝');
+    expect(visible()).toContain('receipt-original');
+    expect(visible()).toContain('已拒绝');
+    expect(buttons().some(b => b.textContent?.includes('审阅后提交'))).toBe(false);
+    expect(effects(calls)).toEqual([]);
+    await click('查询原提交回执');
+    await wait(() => visible().includes('已核对交付记录；状态以原回执为准'));
+    expect(effects(calls).map(c => JSON.parse(c.args.input))).toEqual([{ operation: 'reconcile', id: record.id }]);
+});
+
+test('an immediate rejected submit receipt resolves the same request', async () => {
+    const original = prepared();
+    const calls = await start(p => envelope(p.operation === 'list' ? { items: [summary(original)], nextCursor: null } : p.operation === 'detail' ? original : rejected(original)));
+    await wait(() => !!container.querySelector(`[aria-label="审阅交付 ${original.id}"]`));
+    await submitReview();
+    await wait(() => visible().includes('receipt-original'));
+    expect(visible()).toContain('交付已被拒绝');
+    expect(visible()).not.toContain('原提交的结果尚不确定');
+    expect(effects(calls).map(c => JSON.parse(c.args.input).operation)).toEqual(['submit']);
+});
+
+for (const mismatch of ['rejected-without-receipt', 'rejected-pending-receipt', 'submitted-rejected-receipt', 'failed-with-receipt'] as const) {
+    test(`detail refuses inconsistent terminal status ${mismatch}`, async () => {
+        const record = rejected();
+        if (mismatch === 'rejected-without-receipt') record.receipt = null;
+        if (mismatch === 'rejected-pending-receipt') record.receipt!.state = 'pending_approval';
+        if (mismatch === 'submitted-rejected-receipt') record.status = 'submitted';
+        if (mismatch === 'failed-with-receipt') record.status = 'failed';
+        const calls = await start(p => envelope(p.operation === 'list' ? { items: [summary(record)], nextCursor: null } : record));
+        await wait(() => !!container.querySelector(`[aria-label="审阅交付 ${record.id}"]`));
+        container.querySelector<HTMLButtonElement>(`[aria-label="审阅交付 ${record.id}"]`)!.click();
+        await wait(() => visible().includes('交付记录或回执身份无效'));
+        expect(visible()).not.toContain('receipt-original');
+        expect(effects(calls)).toEqual([]);
+    });
+}
+
 test('manual submit reviews frozen actual detail and sends only operation plus original id', async () => {
     let record = prepared();
     const calls = await start(p => envelope(p.operation === 'list' ? { items: [summary(record)], nextCursor: null } : p.operation === 'submit' ? (record = submitted(record)) : record));

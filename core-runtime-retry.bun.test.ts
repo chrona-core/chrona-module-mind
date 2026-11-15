@@ -10,6 +10,7 @@ import {CoreRuntime,RUNTIME_ACCESS} from './core-runtime';
 import {CoreObservationCoordinator} from './core-observation';
 import type {CoreAccess} from './core-types';
 import type {CoreCall,CoreExecutionJournal,Execution,ToolFact} from './core-execution';
+import {assertExplicitRetryIssuesFreshAttempt,assertPoisonedHeadDoesNotStarveTail,assertTerminalRecordsReleaseQuota} from '../../__testing__/state-machine-invariants';
 
 const identity={moduleId:'mind-retry',hash:'v1'};
 const owner:CoreAccess={subject:'authenticated-owner',role:'owner',scopes:[{}]};
@@ -47,6 +48,16 @@ class Fixture {
   if(target==='agent.stop'){const r=this.runs().find(r=>r.runId===args.runId)!;return {...r,stopConfirmed:!r.active};}
   throw Error(`Unexpected gateway call ${JSON.stringify(target)}`);
  };
+ checkpoint(body:string,key:string,waitFor?:'permission'|'budget'){
+  const run=this.runs().at(-1)!,p=this.pursuit;
+  const mutation={pursuitId:p.id,expectedRevision:p.revision,expectedVisibilityRevision:this.store.read().visibilityRevision};
+  const access=this.runtime.accessForCaller('adapter:mind',true,run.runId);
+  const document=this.actions.create({...mutation,actionKey:`${key}:document`,target:'document',arguments:{},document:{title:'Development checkpoint',body}},access);
+  const candidate=this.service.progress({...mutation,actionKey:`${key}:progress`,summary:`Saved actual implementation progress: ${key}`,artifactRefs:[document.ref],originalReceiptRef:`${key}:document`,evidenceRefs:p.evidenceRefs,
+   desiredStatus:waitFor?'waiting':'active',...(waitFor?{waitFor}:{}),nextStep:'Resume /workspace/train-app/src/index.ts and fix the failing arrival-time check'},access);
+  const fact:ToolFact={...identity,runId:run.runId,callId:`${key}:progress`,target:{moduleId:identity.moduleId,tool:'progress'},status:'succeeded',outputState:'complete',output:candidate};
+  run.items.push({kind:'tool-result',payload:{type:'tool-result',value:fact}});this.save(run);return document;
+ }
  seed(journal:CoreExecutionJournal,count:number,purpose:Execution['purpose']='understand'){
   for(let i=0;i<count;i++){const e=journal.prepare({purpose,subject:`settled-${i}`,revision:0,visibilityRevision:0,prompt:'Already settled fixture run',tools:[]},this.now);e.ended=true;e.settled=true;e.status='finished';e.terminalStatus='finished';journal.save(e);}
  }
@@ -79,7 +90,7 @@ for(const hold of ['none','pause','forget','unknown-effect'] as const)test(`unre
   await f.runtime.tick();expect(f.runs()).toHaveLength(1);
   f.restart();f.advance(59999);await f.runtime.tick();expect(f.runs()).toHaveLength(1);
   f.advance(1);await f.runtime.tick();expect(f.runs()).toHaveLength(hold==='none'?2:1);
-  if(hold==='none'){expect(String(f.runs()[1].args.prompt)).toContain(`\"expectedVisibilityRevision\":${f.store.read().visibilityRevision}`);f.finish('failed');await f.runtime.tick();f.advance(300000);await f.runtime.tick();expect(f.runs()).toHaveLength(3);f.finish('failed');await f.runtime.tick();f.advance(86400000);f.restart();await f.runtime.tick();expect(f.runs()).toHaveLength(3);}
+  if(hold==='none'){expect(String(f.runs()[1].args.prompt)).toContain(`"expectedVisibilityRevision":${f.store.read().visibilityRevision}`);f.finish('failed');await f.runtime.tick();f.advance(300000);await f.runtime.tick();expect(f.runs()).toHaveLength(3);f.finish('failed');await f.runtime.tick();f.advance(86400000);f.restart();await f.runtime.tick();expect(f.runs()).toHaveLength(3);}
   else expect(f.pursuit.status).not.toBe('done');
   expect(f.runs()[0].runId).toBe(original.runId);
  }finally{f.close();}
@@ -267,5 +278,172 @@ test.each([true,false])('restart releases an older actor from terminal evidence 
   f.finish();e.ended=true;e.active=false;e.terminalStatus='finished';e.stopRequested=true;e.stopConfirmed=false;e.settled=settled;e.status='failed';f.runtime.journal.save(e);
   f.obsoleteContext=true;f.restart();await f.runtime.tick(false,false,false);
   expect(f.pursuit.currentActor).toBeUndefined();expect(f.runtime.journal.get(e.id).stopConfirmed).toBe(true);expect(f.runs()).toHaveLength(1);
+ }finally{f.close();}
+});
+
+for(const tail of ['explicit-goal','understanding','last-start-understanding'] as const)test(`capped opportunities do not starve ${tail} behind the head`,async()=>{
+ const f=new Fixture();let healthy='';try{
+  await assertPoisonedHeadDoesNotStarveTail({windowSize:1,maxTicks:2,
+   seedBlockedHead:count=>{
+    for(let i=0;i<3;i++){f.goal(`source-${i}`);f.control('pause',`pause-source-${i}`);}
+    const evidenceRefs=f.store.read().evidence.map(e=>e.id);
+    for(let i=0;i<count;i++)f.service.pursue({actionKey:`improvement-${i}`,expectedRevision:0,expectedVisibilityRevision:f.store.read().visibilityRevision,
+     semanticKey:`improve-${i}`,goal:`Improve recurring workflow ${i}`,completionCriteria:['Useful improvement'],scope:{},reason:'improvement',evidenceRefs},owner);
+    f.seed(f.runtime.journal,8,'opportunity');
+    if(tail==='last-start-understanding')f.seed(f.runtime.journal,15);
+   },
+   seedHealthyTail:()=>{
+    if(tail==='explicit-goal'){healthy=f.goal('healthy-explicit-goal').id;return;}
+    if(tail==='last-start-understanding')f.goal('needs-two-starts');
+    f.service.ingest({sourceIdentity:'chat-tail',epoch:'one',expectedCheckpointRevision:0,nextCursor:'2',scopeRevision:1,capturedAt:f.now,coverage:{complete:true},events:[
+     {id:'tail-user',eventId:'tail-user',cursor:'1',object:{kind:'message',id:'tail-user',revision:1},kind:'message',actor:'user',scope:{},origin:{rootId:'tail'},occurredAt:f.now,receivedAt:f.now,scopeRevision:1,content:{text:'Remember my preference for trains',truncated:false}},
+     {id:'tail-ended',eventId:'tail-ended',cursor:'2',object:{kind:'execution',id:'tail',revision:1},kind:'operation',actor:'application',scope:{},origin:{rootId:'tail'},occurredAt:f.now,receivedAt:f.now,scopeRevision:1,content:{text:JSON.stringify({foregroundActive:false,pendingCommand:false,terminalConfirmed:true}),truncated:false}}
+    ]},RUNTIME_ACCESS);
+   },tick:async()=>{f.restart();await f.runtime.tick(true);},
+   isTailProcessed:()=>!!f.runs().length&&(tail==='explicit-goal'?f.store.read().pursuits.find(p=>p.id===healthy)?.currentActor?.runRef===f.runs()[0].runId:f.runtime.journal.outstanding()?.purpose==='understand')
+  });
+  expect(f.runs()).toHaveLength(1);expect(f.runtime.view().budget.opportunities).toBe(8);expect(f.runtime.lastError).toBeNull();
+  if(tail==='last-start-understanding')expect(f.runtime.view().budget.starts).toBe(24);
+ }finally{f.close();}
+});
+
+test('explicit owner retry after failure creates a fresh attempt with failure context instead of replaying the failed command',async()=>{
+ const f=new Fixture();try{
+  await assertExplicitRetryIssuesFreshAttempt({
+   runFailingAttempt:async()=>{f.goal();await f.runtime.tick();f.finish('failed');await f.runtime.tick();return f.runs()[0];},
+   retry:async failed=>{f.control('resume','explicit-retry');f.restart();await f.runtime.tick();const retry=f.runs().at(-1)!;
+    expect(retry.contextId).not.toBe(failed.contextId);expect(String(retry.args.prompt)).toContain('Worker ended with failed status');
+    expect(String(retry.args.prompt)).toContain(`"previousRun":"${failed.runId}"`);
+   },observedDownstreamAttempts:()=>new Set(f.keys).size
+  });
+ }finally{f.close();}
+});
+
+for(const waitFor of [undefined,'budget','permission'] as const)test(`concrete checkpoint continuation respects ${waitFor??'active'} status and stops on identical content`,async()=>{
+ const f=new Fixture();try{
+  const original=f.goal();await f.runtime.tick();
+  const body='Workspace /workspace/train-app/src/index.ts now implements timetable parsing. Check: arrival-time test fails for 11:30. Next: fix the date conversion.';
+  const artifact=f.checkpoint(body,'first',waitFor);f.finish();await f.runtime.tick();
+  expect(f.pursuit.artifactRefs).toContain(artifact.ref);f.restart();f.advance(60000);await f.runtime.tick();
+  expect(f.runs()).toHaveLength(waitFor==='permission'?1:2);
+  if(waitFor==='permission'){expect(f.pursuit.waitFor).toBe('permission');return;}
+  const prompt=String(f.runs()[1].args.prompt);expect(prompt).toContain(body);expect(prompt).toContain(artifact.ref);expect(prompt).toContain('Saved concrete progress');
+  expect(f.pursuit.id).toBe(original.id);expect(f.pursuit.goal).toBe(original.goal);
+  f.checkpoint(body,'same-bytes-new-key',waitFor);f.finish();await f.runtime.tick();f.restart();f.advance(86400000);await f.runtime.tick();
+  expect(f.runs()).toHaveLength(2);expect(f.runtime.view().retry).toEqual([]);
+ }finally{f.close();}
+});
+
+test('successive concrete development checkpoints are limited to three attempts across restart',async()=>{
+ const f=new Fixture();try{
+  f.goal();await f.runtime.tick();
+  for(let attempt=1;attempt<=3;attempt++){
+   f.checkpoint(`Workspace /workspace/train-app: implemented step ${attempt}; next check ${attempt+1}`,`step-${attempt}`,'budget');
+   f.finish();await f.runtime.tick();f.restart();f.advance(attempt===1?60000:300000);await f.runtime.tick();
+   expect(f.runs()).toHaveLength(Math.min(attempt+1,3));
+  }
+  expect(f.runtime.view().retry[0]).toMatchObject({attempts:3,nextRetryAt:null});
+  f.advance(86400000);await f.runtime.tick(true);expect(f.runs()).toHaveLength(3);
+ }finally{f.close();}
+});
+
+test('a timed-out development worker resumes saved concrete work only after confirmed stop',async()=>{
+ const f=new Fixture();try{
+  const goal=f.goal();await f.runtime.tick();const first=f.runs()[0];
+  const artifact=f.checkpoint('Workspace /workspace/train-app: parser implemented and checked; fix the arrival-time test next','timed-out','budget');
+  f.advance(180001);await f.runtime.tick();expect(f.runtime.journal.outstanding()?.stopRequested).toBe(false);
+  f.advance(420000);await f.runtime.tick();expect(f.runtime.journal.outstanding()?.stopRequested).toBe(true);expect(f.runtime.journal.outstanding()?.stopConfirmed).toBe(false);
+  f.restart();f.advance(60000);await f.runtime.tick();expect(f.runs()).toHaveLength(1);expect(f.pursuit.currentActor?.runRef).toBe(first.runId);
+  f.finish('cancelled');await f.runtime.tick();expect(f.pursuit.artifactRefs).toContain(artifact.ref);expect(f.pursuit.currentActor).toBeUndefined();
+  f.restart();f.advance(60000);await f.runtime.tick();expect(f.runs()).toHaveLength(2);expect(f.pursuit.id).toBe(goal.id);
+  expect(String(f.runs()[1].args.prompt)).toContain('/workspace/train-app');expect(String(f.runs()[1].args.prompt)).toContain('fix the arrival-time test next');
+ }finally{f.close();}
+});
+
+test('continuation includes the newest candidate handoffs in creation order rather than UUID order',async()=>{
+ const f=new Fixture();try{
+  f.goal();await f.runtime.tick();
+  for(let i=0;i<7;i++){f.advance(1);f.checkpoint(`Workspace /workspace/train-app: concrete implementation step ${i}`,`context-${i}`);}
+  f.finish('failed');await f.runtime.tick();f.restart();f.advance(60000);await f.runtime.tick();
+  const data=JSON.parse(String(f.runs()[1].args.prompt).split('\nData:\n').at(-1)!);
+  expect(data.continuation.candidates.map((c:{summary:string})=>c.summary)).toEqual([6,5,4,3,2].map(i=>`Saved actual implementation progress: context-${i}`));
+ }finally{f.close();}
+});
+
+test('terminal workers release the single active slot for later goals across restarts',async()=>{
+ const f=new Fixture();try{
+  await assertTerminalRecordsReleaseQuota({quota:1,extra:2,
+   allocate:async index=>{const p=f.goal(`goal-${index}`);await f.runtime.tick();expect(f.runs()).toHaveLength(index+1);expect(f.pursuit.currentActor).toBeDefined();return p.id;},
+   settleTerminal:async id=>{f.finish();await f.runtime.tick();f.restart();expect(f.store.read().pursuits.find(p=>p.id===id)?.currentActor).toBeUndefined();expect(f.runtime.journal.outstanding()).toBeUndefined();},
+  });
+ }finally{f.close();}
+});
+
+test('a delayed continuation retains failure and concrete workspace context after execution retention pruning',async()=>{
+ const f=new Fixture();try{
+  f.goal();f.service.settings({actionKey:'retain-source',expectedRevision:f.store.read().settings.revision,
+   expectedVisibilityRevision:f.store.read().visibilityRevision,patch:{eventRetentionDays:90}},owner);
+  await f.runtime.tick();const document=f.checkpoint('Workspace /workspace/train-app: saved timetable parser and failing noon-boundary check','delayed');
+  f.finish('failed');await f.runtime.tick();f.restart();f.advance(31*86400000);await f.runtime.tick();
+  expect(f.runs()).toHaveLength(2);expect(f.runtime.journal.all()).toHaveLength(1);
+  const prompt=String(f.runs()[1].args.prompt);expect(prompt).toContain('Worker ended with failed status');expect(prompt).toContain(document.body);expect(prompt).toContain('run-1');
+ }finally{f.close();}
+});
+
+test('the final permission wait supersedes an earlier active checkpoint from the same worker',async()=>{
+ const f=new Fixture();try{
+  f.goal();await f.runtime.tick();
+  f.checkpoint('Implemented the parser in /workspace/train-app','intermediate');
+  f.advance(1);f.checkpoint('Parser ready; owner must approve access to the private timetable','final-wait','permission');
+  f.finish();await f.runtime.tick();
+  expect(f.store.read().pursuits[0]?.waitFor).toBe('permission');
+  f.restart();f.advance(60000);await f.runtime.tick();
+  expect(f.runs()).toHaveLength(1);
+ }finally{f.close();}
+});
+
+test('a stale completion candidate cannot schedule repair over an already applied permission wait',async()=>{
+ const f=new Fixture();try{
+  f.goal();await f.runtime.tick();const document=f.checkpoint('Workspace /workspace/train-app: awaiting private timetable permission','permission','permission');
+  const pending=f.store.read().candidates.find(c=>c.runRef==='run-1')!,run=f.runs()[0];
+  const completion=f.service.progress({actionKey:'stale-completion',pursuitId:f.pursuit.id,expectedRevision:f.pursuit.revision,
+   expectedVisibilityRevision:f.store.read().visibilityRevision,summary:'Claimed complete before permission was applied',desiredStatus:'done',
+   artifactRefs:[document.ref],evidenceRefs:f.pursuit.evidenceRefs,originalReceiptRef:'permission:document'},f.runtime.accessForCaller('adapter:mind',true,run.runId));
+  run.items.push({kind:'tool-result',payload:{type:'tool-result',value:{...identity,runId:run.runId,callId:'stale-completion',
+   target:{moduleId:identity.moduleId,tool:'progress'},status:'succeeded',outputState:'complete',output:completion}}});f.save(run);
+  f.service.applyProgress({candidateId:pending.id,expectedRevision:pending.pursuitRevision,expectedVisibilityRevision:pending.visibilityRevision,
+   actionKey:'permission:apply',verified:{candidateReceipt:pending.receipt,runRef:run.runId,originalReceiptRef:pending.originalReceiptRef,
+    artifactRefs:[document.ref],method:'Exact persisted local artifact digest',criteriaSatisfied:false,executionTerminal:true}},RUNTIME_ACCESS);
+  f.finish();await f.runtime.tick();expect(f.pursuit.waitFor).toBe('permission');expect(f.runtime.view().retry).toEqual([]);
+  f.restart();f.advance(60000);await f.runtime.tick();expect(f.runs()).toHaveLength(1);expect(f.pursuit.waitFor).toBe('permission');
+ }finally{f.close();}
+});
+
+test('failed worker cannot override its final permission wait',async()=>{
+ const f=new Fixture();try{
+  f.goal();await f.runtime.tick();
+  f.checkpoint('Ready for owner permission to access the private timetable','wait-before-failure','permission');
+  f.finish('failed');await f.runtime.tick();
+  f.restart();f.advance(60000);await f.runtime.tick();
+  expect(f.pursuit.waitFor).toBe('permission');expect(f.runs()).toHaveLength(1);
+ }finally{f.close();}
+});
+
+test('escaped checkpoint bodies leave continuation within the agent prompt contract',async()=>{
+ const f=new Fixture();try{
+  f.goal();await f.runtime.tick();f.checkpoint('\u0001'.repeat(40000),'escaped-checkpoint');
+  f.finish();await f.runtime.tick();f.restart();f.advance(60000);await f.runtime.tick();
+  expect(f.runs()).toHaveLength(2);
+  const prompt=String(f.runs().at(-1)!.args.prompt);
+  expect(prompt.length).toBeLessThanOrEqual(200000);expect(prompt).toContain('"truncated":true');
+ }finally{f.close();}
+});
+
+test('capability changes do not release a permission wait; owner resume does',async()=>{
+ const f=new Fixture();try{
+  f.goal();await f.runtime.tick();f.checkpoint('Waiting for owner access to private data','waiting-owner','permission');
+  f.finish('failed');await f.runtime.tick();f.restart();f.hash='new-tool-version';f.advance(60000);await f.runtime.tick();
+  expect(f.pursuit.waitFor).toBe('permission');expect(f.runs()).toHaveLength(1);
+  f.control('resume');await f.runtime.tick();expect(f.runs()).toHaveLength(2);
  }finally{f.close();}
 });
