@@ -148,9 +148,13 @@ function fixture() {
   const failed = await f.app.invoke(f.input(a.id, 'failed'), runtime); expect(failed.status).toBe('failed'); expect(failed.responseBody).toEqual({ ok: false, error: 'lookup failed' });
  });
 
- test('UTF8 result size fails without truncated evidence; invalid replies cannot become successes', async () => {
+ test('application results above 32 KiB stay complete; invalid replies cannot become successes', async () => {
   const f = fixture(), a = await f.app.grant(f.grantInput, owner);
-  for (const raw of [{ body: '界'.repeat(12000) }, { n: Number.NaN }]) {
+  const raw = { body: '界'.repeat(24000) };
+  f.setReply(async () => raw);
+  const complete = await f.app.invoke(f.input(a.id, 'complete'), runtime);
+  expect(complete.status).toBe('succeeded'); expect(complete.responseBody).toEqual(raw);
+  for (const raw of [{ n: Number.NaN }]) {
     f.setReply(async () => raw); const result = await f.app.invoke(f.input(a.id, `large-${f.calls.length}`), runtime);
     expect(result.status).toBe('failed'); expect(result.responseBody).toBeUndefined();
   }
@@ -234,11 +238,11 @@ function fixture() {
   expect(f.store.read().actions.find(r => r.id === 'read-1')?.outcome).toBe('failed');
  });
 
- test('an oversized retry cannot reuse an earlier unknown response as its result', async () => {
+ test('an invalid retry cannot reuse an earlier unknown response as its result', async () => {
   const f = fixture(), a = await f.app.grant(f.grantInput, owner);
   f.setReply(async () => ({ status: 'unknown', receipt: 'original-observation' }));
   expect((await f.app.invoke(f.input(a.id), runtime)).responseBody).toBeDefined();
-  f.setReply(async () => ({ body: '界'.repeat(12000) }));
+  f.setReply(async () => ({ n: Number.NaN }));
   const failed = await f.app.invoke(f.input(a.id), runtime);
   expect(failed.status).toBe('failed'); expect(failed.responseBody).toBeUndefined(); expect(failed.responseDigest).toBeUndefined();
  });

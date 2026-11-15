@@ -7,7 +7,6 @@ import { scopeCovers, type CoreMindService } from './core-service';
 import type { CoreCall } from './core-execution';
 import type { CoreAccess, CoreState, GuardActionInput, Scope } from './core-types';
 
-const MAX_RESULT_BYTES = 32 * 1024;
 const MAX_PARAMS_BYTES = 8 * 1024;
 const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const credentialKey = /^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?(?:secret|token|key)|token|password|passphrase|secret|authorization|cookie|set-cookie|private[_-]?key)$/i;
@@ -200,7 +199,7 @@ export class CoreApplication {
   }
   private withdrawn(stored: StoredInvocation, state: CoreState): boolean {
     const r = stored.receipt, p = state.pursuits.find(p => p.id === r.pursuitId);
-    if (r.contentWithdrawn || state.settings.restoreBlocked || state.visibilityRevision !== r.visibilityRevision || !p || !p.goal) return true;
+    if (r.contentWithdrawn || state.settings.restoreBlocked || !p || !p.goal) return true;
     const basis = stored.basis ?? this.basis(p.id, state);
     const evidenceRefs = new Set([...basis.evidenceRefs, ...p.evidenceRefs]);
     for (const id of new Set([...basis.understandingRefs, ...p.understandingRefs])) {
@@ -328,12 +327,11 @@ export class CoreApplication {
       }
       let body: unknown;
       try {
-        if (Buffer.byteLength(canonical(raw)) > MAX_RESULT_BYTES) throw Error('result-too-large');
+        canonical(raw);
         body = clean(raw);
-        if (Buffer.byteLength(canonical(body)) > MAX_RESULT_BYTES) throw Error('result-too-large');
       } catch (error) {
-        r.status = 'failed'; r.reason = error instanceof Error && error.message === 'result-too-large' ? 'result-too-large' : 'invalid-result';
-        console.error(JSON.stringify({ component: 'mind', event: 'application_result_rejected', reason: r.reason }));
+        r.status = 'failed'; r.reason = 'invalid-result';
+        console.error(JSON.stringify({ component: 'mind', event: 'application_result_rejected', reason: r.reason, error: error instanceof Error ? error.message : String(error) }));
         r.completedAt = new Date().toISOString(); this.save(stored); this.record(stored); return this.readReceipt(ref, access);
       }
       if (isObject(raw) && (raw.status === 'unknown' || raw.outputState === 'unknown' || raw.approvalRequired === true || raw.status === 'pending')) {
