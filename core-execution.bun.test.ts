@@ -39,7 +39,7 @@ test('real called target identities retain selected Author and kernel facts whil
  try{f.journal.prepare({...input,tools:targets,principal},now);await new CoreExecutor(f.journal,call,{current:()=>true,settle:async e=>{settled=structuredClone(e);}}).reconcile(now);expect(settled?.facts.map(x=>x.callId)).toEqual(['stage','admission','self']);expect(settled?.principal).toEqual(principal);expect(f.journal.outstanding()).toBeUndefined();}finally{f.cleanup();}
 });
 
-test('visibility withdrawn between terminal read and settlement confirms the original stop before settling',async()=>{
+test('visibility withdrawn after a terminal read settles from actual stopped evidence without an extra stop',async()=>{
  const f=fixture();let current=true,stops=0,settlements=0;
  const call:CoreCall=async target=>{
   if(target==='agent.run')return {runId:'r',contextId:'c',status:'running',active:true};
@@ -49,7 +49,6 @@ test('visibility withdrawn between terminal read and settlement confirms the ori
  };
  try{
   f.journal.prepare(input,now);const ex=new CoreExecutor(f.journal,call,{current:()=>current,settle:async()=>{settlements++;}});
-  await ex.reconcile(now);expect(settlements).toBe(0);expect(f.journal.outstanding()?.settled).toBe(false);
-  await ex.reconcile(now);expect(stops).toBe(1);expect(settlements).toBe(1);expect(f.journal.outstanding()).toBeUndefined();
+  await ex.reconcile(now);expect(stops).toBe(0);expect(settlements).toBe(1);expect(f.journal.outstanding()).toBeUndefined();
  }finally{f.cleanup();}
 });
