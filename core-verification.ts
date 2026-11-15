@@ -122,7 +122,7 @@ export class CoreVerification {
       throw Error('Only bounded exact persisted application-read or document artifacts can be verified here; module delivery requires its coordinator');
     const documents = c.artifactRefs.map(ref => {
       const d = this.options.actions.read(ref);
-      if (d.ref !== ref || d.pursuitId !== c.pursuitId || d.visibilityRevision !== c.visibilityRevision ||
+      if (d.ref !== ref || d.pursuitId !== c.pursuitId ||
         !d.body.trim() || d.body.length > 150000 || bodyDigest(d.body) !== d.digest)
         throw Error('Actual persisted artifact material does not match the candidate');
       // Mind's actual {json:string} output must fit kernel's retained result; filtered/truncated reads cannot prove the full original.

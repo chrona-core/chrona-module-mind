@@ -64,7 +64,7 @@ async function fixture(reply: unknown = { departure: '09:00', arrival: '11:30', 
 }
 
 function candidateFor(f: Awaited<ReturnType<typeof fixture>>, document: DocumentArtifact) {
-  const candidate = f.service.progress({ actionKey: 'progress', pursuitId: 'p', expectedRevision: 2, expectedVisibilityRevision: 0,
+  const candidate = f.service.progress({ actionKey: 'progress', pursuitId: 'p', expectedRevision: 2, expectedVisibilityRevision: f.store.read().visibilityRevision,
     summary: 'Published timetable read for independent assessment', artifactRefs: [document.ref], originalReceiptRef: document.ref, evidenceRefs: ['e'], desiredStatus: 'done' }, workerAccess).value!;
   f.worker.facts = [fact('action', document, 'worker-run', 'original-action'), fact('progress', { value: candidate }, 'worker-run')];
   f.workers.save(f.worker);
@@ -166,7 +166,8 @@ test.each(['source', 'visibility', 'goal', 'scope'])('receipt artifact enforces 
         if (mode === 'visibility') tx.setMeta({ ...tx.meta(), visibilityRevision: 1 });
         if (mode === 'goal') { const p = tx.get('pursuit', 'p')!; p.goal = 'Different current goal'; p.revision++; tx.put('pursuit', p); }
       });
-      expect(() => f.actions.read(document.ref, verifierAccess)).toThrow();
+      if (mode === 'visibility') expect(f.actions.read(document.ref, verifierAccess)).toEqual(document);
+      else expect(() => f.actions.read(document.ref, verifierAccess)).toThrow();
       expect(f.verification.assess(request.id).status).toBe('invalidated');
     }
   } finally { f.close(); }
@@ -206,3 +207,17 @@ test('forget cleanup removes all succeeded and unknown derived response bodies f
     }
   } finally { f.close(); }
 });
+
+ test('new verification can reuse an unchanged artifact after unrelated forgetting', async () => {
+  const f = await fixture(); try {
+    const document = await f.actions.applicationRead(f.input, workerAccess) as DocumentArtifact;
+    f.service.forget({ actionKey: 'forget-other', expectedVisibilityRevision: 0,
+      target: { kind: 'session', sessionId: 'other-session' } }, owner);
+    f.actions.forgetPursuits([]);
+    const { request, input } = await prepareVerification(f, document);
+    const receipt = f.verification.verdict(input, binding);
+    f.finish(document, receipt); await f.verification.reconcile(now);
+    expect(f.verification.assess(request.id).status).toBe('accepted');
+    expect(f.appCalls).toBe(1);
+  } finally { f.close(); }
+ });
