@@ -3,11 +3,13 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+export function mainModelSelection(settings:{mainProviderId?:string;mainModel?:string}) { return {providerId:settings.mainProviderId,model:settings.mainModel}; }
+
 export type Target = string | { moduleId: string; tool: string };
 export type CoreCall = (target: Target, args: Record<string, unknown>, options?: { key?: string; expectedTarget?: { moduleId: string; hash?: string } }) => Promise<unknown>;
 export type ToolFact = { runId: string; callId: string; target: Target; moduleId: string; hash: string; status: string; outputState: string; output?: unknown };
 export type Execution = {
- id: string; purpose: 'understand'|'pursuit'|'opportunity'; subject: string; basis?: string; evidenceRefs?: string[]; revision: number; visibilityRevision: number;
+ id: string; purpose: 'understand'|'organize'|'pursuit'|'opportunity'; subject: string; basis?: string; evidenceRefs?: string[]; revision: number; visibilityRevision: number;
  principal?: {moduleId:string;hash:string}; key: string; args: Record<string, unknown>; tools: Target[]; createdAt: string; activityStartedAt: string|null;
  contextId: string|null; runId: string|null; cursor: string|null; status: 'prepared'|'running'|'waiting'|'unknown'|'settling'|'finished'|'failed';
  ended: boolean; active: boolean; terminalStatus?: string; stopRequested: boolean; stopConfirmed: boolean; stopKey: string;
@@ -30,7 +32,7 @@ function runView(raw: unknown) {
 /** This journal stores command identities and observations; all execution remains in kernel's unique queue. */
 export class CoreExecutionJournal {
  readonly db: Database;
- constructor(directory: string) {
+ constructor(directory: string, private readonly modelSelection?: () => {providerId?: string; model?: string}) {
   mkdirSync(directory, {recursive:true,mode:0o700}); const path=join(directory,'mind-execution.sqlite');
   this.db=new Database(path,{create:true}); chmodSync(path,0o600);
   this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY, created_at TEXT NOT NULL, json TEXT NOT NULL);');
@@ -39,16 +41,16 @@ export class CoreExecutionJournal {
  save(e:Execution) { this.db.query('INSERT INTO executions(id,created_at,json) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json').run(e.id,e.createdAt,JSON.stringify(e)); return structuredClone(e); }
  get(id:string):Execution { const row=this.db.query('SELECT json FROM executions WHERE id=?').get(id) as {json:string}|null; if(!row)throw Error('Execution not found'); return JSON.parse(row.json) as Execution; }
  outstanding() { return this.all().find(e=>!e.settled); }
- prepare(input:{purpose:Execution['purpose'];subject:string;basis?:string;evidenceRefs?:string[];revision:number;visibilityRevision:number;prompt:string;tools:Target[];principal?:{moduleId:string;hash:string}}, now:string, budget=24, opportunityBudget=8) {
+ prepare(input:{purpose:Execution['purpose'];subject:string;basis?:string;evidenceRefs?:string[];revision:number;visibilityRevision:number;prompt:string;tools:Target[];selection?:{providerId?:string;model?:string};principal?:{moduleId:string;hash:string}}, now:string, budget=24, opportunityBudget=8) {
   return this.db.transaction(()=>{
    if(this.outstanding())throw Error('Previous execution or effect still requires reconciliation');
    const today=this.all().filter(e=>e.createdAt.slice(0,10)===now.slice(0,10));
    if(today.length>=budget || input.purpose==='opportunity'&&today.filter(e=>e.purpose==='opportunity').length>=opportunityBudget)throw Error('Background start budget exhausted');
    if(input.tools.length>100 || new Set(input.tools.map(targetKey)).size!==input.tools.length)throw Error('Invalid selected tools');
    if(input.tools.some(t=>typeof t==='string' && (/^(approvals\.(resolve|request)|secrets\.|settings\.|agent\.(run|native)|modules\.(install|remove|rollback|promote))/.test(t)))) throw Error('Autonomous tool selection includes unrestricted administration');
-   const id=randomUUID();
+   const id=randomUUID(),selection=input.selection??this.modelSelection?.();
    return this.save({id,purpose:input.purpose,subject:input.subject,basis:input.basis,...(input.evidenceRefs?{evidenceRefs:[...input.evidenceRefs]}:{}),revision:input.revision,visibilityRevision:input.visibilityRevision,principal:input.principal,key:`mind:${id}:run`,
-    args:{prompt:input.prompt,content:[],lane:'background',tools:input.tools,kind:'conversation'},tools:structuredClone(input.tools),createdAt:now,activityStartedAt:null,contextId:null,runId:null,cursor:null,status:'prepared',ended:false,active:false,stopRequested:false,stopConfirmed:false,stopKey:`mind:${id}:stop`,error:null,interactions:[],facts:[],summary:'',settled:false});
+    args:{prompt:input.prompt,content:[],lane:'background',tools:input.tools,kind:'conversation',...(selection?.providerId?{providerId:selection.providerId}:{}),...(selection?.model?{providerOptions:{model:selection.model}}:{})},tools:structuredClone(input.tools),createdAt:now,activityStartedAt:null,contextId:null,runId:null,cursor:null,status:'prepared',ended:false,active:false,stopRequested:false,stopConfirmed:false,stopKey:`mind:${id}:stop`,error:null,interactions:[],facts:[],summary:'',settled:false});
   }).immediate();
  }
  scrubInvalid(keep:(e:Execution)=>boolean){let deferred=0;for(const e of this.all()){
@@ -77,7 +79,7 @@ export class CoreExecutor {
    let e=this.journal.outstanding(); if(!e)return; e=this.refresh(e.id);
    if(e.status==='settling'){await this.settle(e);return;}
    const current=this.hooks.current(e);
-   if(!current || e.activityStartedAt && Date.parse(now)-Date.parse(e.activityStartedAt)>(e.purpose==='opportunity'?180000:600000))e.stopRequested=true;
+   if(!current || e.activityStartedAt && Date.parse(now)-Date.parse(e.activityStartedAt)>(['opportunity','organize'].includes(e.purpose)?180000:600000))e.stopRequested=true;
    if(!e.runId){
     // Even when withdrawn, prepared/unknown requests must query the *original* command identity.
     // Pure prepared commands have no dispatch intent yet and may be cancelled without dispatch.

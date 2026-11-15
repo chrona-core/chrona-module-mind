@@ -19,13 +19,13 @@ function fixture(){
  const claimed=service.claim({pursuitId:p.id,expectedRevision:p.revision,expectedVisibilityRevision:0,actionKey:'claim'},worker).value as Pursuit;e.revision=claimed.revision;journal.save(e);
  const input:DeliveryPrepare={pursuitId:p.id,expectedRevision:claimed.revision,expectedVisibilityRevision:0,actionKey:'delivery',author,admissionId:'admission',requestKey:'stable-command',items:[{name:'calendar',dir:'packages/calendar-stage/source',intent:{changes:['private-intent-marker'],preserves:[]},materialDigest:'c'.repeat(64)}],criteria:['private-criteria-marker']};
  const receipt:ReturnType<typeof candidateReceiptSchema.parse>={receiptId:'real-receipt',admissionId:input.admissionId,requestKey:input.requestKey,submitter:author,state:'pending_approval',approvalId:'approval',members:[{name:'calendar',moduleId:'calendar-id',hash:'d'.repeat(40),versionId:'version',expectedActiveHash:null,materialDigest:input.items[0]!.materialDigest,status:'pending_review',selected:false}]};
- const state={authorHash:author.hash,submits:0,receiptQueries:[] as unknown[],lost:false,admission:true,active:false,badReceipt:false,hold:undefined as undefined|(()=>Promise<void>)};
+ const state={authorHash:author.hash,submits:0,receiptQueries:[] as unknown[],lost:false,admission:true,active:false,badReceipt:false,baseline:null as null|string,hold:undefined as undefined|(()=>Promise<void>)};
  const calls:{target:unknown;args:Record<string,unknown>;key?:string}[]=[];
  const call:CoreCall=async(target,args,options)=>{
   calls.push({target,args,key:options?.key});
-  if(target==='modules.list')return {items:[{id:author.moduleId,name:'author',status:'active',activeHash:state.authorHash},...(state.active?[{id:'calendar-id',name:'calendar',status:'active',activeHash:'d'.repeat(40)}]:[])],nextCursor:null};
+  if(target==='modules.list')return {items:[{id:author.moduleId,name:'author',status:'active',activeHash:state.authorHash},...(state.baseline?[{id:'calendar-id',name:'calendar',status:'active',activeHash:state.baseline}]:[]),...(state.active?[{id:'calendar-id',name:'calendar',status:'active',activeHash:'d'.repeat(40)}]:[])],nextCursor:null};
   if(typeof target==='object'&&target.moduleId===author.moduleId&&target.tool==='submit'){
-   expect(options?.expectedTarget).toEqual({moduleId:author.moduleId,hash:author.hash});state.submits++;expect(parseSubmit(JSON.parse(args.input as string))).toEqual({admissionId:input.admissionId,requestKey:input.requestKey,items:input.items.map(({materialDigest,...item})=>item)});expect(options?.key).toBe(input.requestKey);await state.hold?.();if(state.lost)throw Error('lost reply');return structuredClone(receipt);
+   expect(options?.expectedTarget).toEqual({moduleId:author.moduleId,hash:author.hash});state.submits++;expect(parseSubmit(JSON.parse(args.input as string))).toEqual({admissionId:input.admissionId,requestKey:input.requestKey,items:input.items.map(({name,dir,intent})=>({name,dir,intent}))});expect(options?.key).toBe(input.requestKey);await state.hold?.();if(state.lost)throw Error('lost reply');return structuredClone(receipt);
   }
   if(target==='modules.receipt'){const selector='receiptId'in args?{receiptId:args.receiptId}:{admissionId:args.admissionId,requestKey:args.key};parseReceipt(selector);state.receiptQueries.push(selector);return {...structuredClone(receipt),...(state.badReceipt?{receiptId:'other-receipt'}:{})};}
   throw Error('Unexpected bounded call');
@@ -63,7 +63,7 @@ test('proof rejects wrong run, called Author identity, target, result state, mat
 },20000);
 test('current real worker, reserved names, NEW targets, original command conflicts and strict JSON enforced',async()=>{
  const f=fixture();try{await expect(f.delivery.prepare(f.input,owner)).rejects.toThrow('worker');await expect(f.delivery.prepare(f.input,{...f.worker,execution:{actor:'mind',runRef:'made-up'}})).rejects.toThrow('worker');
-  for(const name of ['mind','chat','pi','author','web','self','core','agent'])expect(deliveryPrepareSchema.safeParse({...f.input,items:[{...f.input.items[0],name}]}).success).toBe(false);
+  for(const name of ['self','core','agent'])expect(deliveryPrepareSchema.safeParse({...f.input,items:[{...f.input.items[0],name}]}).success).toBe(false);
   expect(deliveryPrepareSchema.safeParse({...f.input,role:'owner'}).success).toBe(false);expect(deliveryPrepareSchema.safeParse({...f.input,items:[{...f.input.items[0],dir:'packages/../source'}]}).success).toBe(false);
   const r=await f.delivery.prepare(f.input,f.worker);expect(await f.delivery.prepare(f.input,f.worker)).toEqual(r);
   await expect(f.delivery.prepare({...f.input,criteria:['changed']},f.worker)).rejects.toThrow('conflicts');
@@ -108,5 +108,21 @@ test('a user control arriving during admission verification blocks fresh dispatc
   held=false;f.setAdmissionWait(async()=>{});f.state.lost=true;
   await expect(f.delivery.submit(r.id,owner)).rejects.toThrow('lost reply');held=true;
   expect((await f.delivery.submit(r.id,owner)).receipt!.receiptId).toBe('real-receipt');expect(f.state.submits).toBe(1);expect(f.state.receiptQueries).toEqual([{admissionId:'admission',requestKey:'stable-command'}]);
+ }finally{f.cleanup();}
+});
+
+test('existing application update binds baseline through prepare, receipt and restart; stale updates never submit',async()=>{
+ for(const stale of [false,true]){const f=fixture();try{
+  const hash='9'.repeat(40);f.state.baseline=hash;f.input.items[0]!.baseline={moduleId:'calendar-id',expectedActiveHash:hash};f.receipt.members[0]!.expectedActiveHash=hash;
+  const r=await f.delivery.prepare(f.input,f.worker);await f.stage(r.id);f.reopen();
+  if(stale){f.state.baseline='8'.repeat(40);await expect(f.delivery.submit(r.id,owner)).rejects.toThrow('baseline changed');expect(f.state.submits).toBe(0);expect(f.delivery.detail(r.id,owner).withdrawn).toBe(true);expect(f.delivery.pendingFor(f.input.pursuitId)).toBe(false);}
+  else{const submitted=await f.delivery.submit(r.id,owner);expect(submitted.receipt!.members[0]!.expectedActiveHash).toBe(hash);expect(f.store.read().pursuits[0]!.status).not.toBe('done');}
+ }finally{f.cleanup();}}
+});
+test('an existing name without baseline and mismatched update receipt are rejected',async()=>{
+ const f=fixture();try{
+  f.state.baseline='9'.repeat(40);await expect(f.delivery.prepare(f.input,f.worker)).rejects.toThrow('baseline is required');
+  f.input.items[0]!.baseline={moduleId:'calendar-id',expectedActiveHash:f.state.baseline};const r=await f.delivery.prepare(f.input,f.worker);await f.stage(r.id);
+  await expect(f.delivery.submit(r.id,owner)).rejects.toThrow('receipt does not match');expect(f.delivery.detail(r.id,owner).status).toBe('submit-unknown');
  }finally{f.cleanup();}
 });

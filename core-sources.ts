@@ -1,3 +1,4 @@
+import {redactSensitiveText} from './core-redaction';
 import { z } from "zod";
 import { coreDigest, type CoreMindStore } from "./core-store";
 import type { CoreAccess, IngestBatch, Scope as EvidenceScope, SourceCheckpoint } from "./core-types";
@@ -399,4 +400,18 @@ export class CoreSources {
       return result;
     }
   }
+}
+
+/** Applications report only their own bounded operations. Identity/version come from the routed caller. */
+const operationReport = z.object({eventId:z.string().trim().min(1).max(128),operation:z.string().trim().min(1).max(200),outcome:z.enum(['succeeded','failed','unknown']),detail:z.string().max(2000).optional(),page:z.string().max(500).optional()}).strict();
+export function ingestApplicationOperation(store:CoreMindStore,service:SourceIngestor,caller:{moduleId:string;hash:string},input:unknown,at=new Date().toISOString()){
+ const report=operationReport.parse(input),sourceIdentity=`application:${caller.moduleId}`;
+ const content={text:redactSensitiveText(JSON.stringify({...report,applicationId:caller.moduleId,applicationVersion:caller.hash}),Number.MAX_SAFE_INTEGER),truncated:false};
+ const state=store.read(),previous=state.evidence.find(e=>e.sourceIdentity===sourceIdentity&&e.eventId===report.eventId);
+ if(previous){if(previous.retractedAt||previous.expiredAt)throw Error('Operation report was withdrawn or expired');if(previous.content?.text!==content.text)throw Error('Operation event identity already used with different content');return {accepted:true,eventId:report.eventId};}
+ const checkpoint=state.checkpoints.find(c=>c.sourceIdentity===sourceIdentity),cursor=String(BigInt(checkpoint?.cursor??'0')+1n);
+ service.ingest({sourceIdentity,epoch:'application-operations-v1',expectedCheckpointRevision:checkpoint?.revision??0,nextCursor:cursor,scopeRevision:0,capturedAt:at,coverage:{complete:true},events:[{
+  id:report.eventId,eventId:report.eventId,cursor,object:{kind:'operation',id:report.eventId,revision:1},kind:'operation',scope:{},actor:'application',origin:{rootId:report.eventId},occurredAt:at,receivedAt:at,scopeRevision:0,content,sourceKind:'application',
+ } as IngestBatch['events'][number]]},ACCESS);
+ return {accepted:true,eventId:report.eventId};
 }

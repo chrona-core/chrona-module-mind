@@ -11,7 +11,7 @@ export async function readCapabilities(call:CoreCall){
 }
 /** Pure reads and current-run material preparation. Effectful app operations go through concrete mind.action adapters. */
 export function selectMindTools(capabilities:Capability[],selfId:string,mode:'understand'|'pursuit'){
- const self=mode==='understand'?['context','remember','pursue','control','feedback']:['context','detail','progress','action','applications','delivery'];
+ const self=mode==='understand'?['context','detail','remember','pursue','control','feedback']:['context','detail','progress','action','applications','delivery'];
  const selected:Target[]=self.map(tool=>({moduleId:selfId,tool}));
  const system=new Set(['modules.list','modules.describe','modules.health','modules.receipt','agent.providers']);
  for(const c of capabilities){if(!c.available)continue;if(typeof c.target==='string'){if(system.has(c.target))selected.push(c.target);continue;}
