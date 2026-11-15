@@ -259,3 +259,12 @@ test('startup directory discovery does not block original lost-command reconcili
   release();await coordinator.settled();
  }finally{release?.();f.close();}
 });
+
+test('restart reconciles the original stop and releases an actor left by an older settled execution',async()=>{
+ const f=new Fixture();try{
+  f.goal();await f.runtime.tick();const e=f.runtime.journal.outstanding()!;expect(f.pursuit.currentActor?.runRef).toBe(e.runId!);
+  f.finish();e.ended=true;e.active=false;e.terminalStatus='finished';e.stopRequested=true;e.stopConfirmed=false;e.settled=true;e.status='failed';f.runtime.journal.save(e);
+  f.restart();await f.runtime.tick(false,false,false);
+  expect(f.pursuit.currentActor).toBeUndefined();expect(f.runtime.journal.get(e.id).stopConfirmed).toBe(true);expect(f.runs()).toHaveLength(1);
+ }finally{f.close();}
+});

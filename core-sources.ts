@@ -119,6 +119,7 @@ export class CoreSources {
       try { response = await this.call({ moduleId: result.source!.moduleId, tool }, input); }
       catch (error) {
         const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+        console.error(JSON.stringify({ component: 'mind', event: 'source_call_failed', tool, error: /^[a-zA-Z_]{1,64}$/.test(code) ? code : 'unclassified source call error' }));
         fail(SAFE_CODES.has(code) ? code : "source_call_failed");
       }
       // Adapter normally unwraps SDK JSON. Supporting the envelope also makes failures explicit.
@@ -386,7 +387,7 @@ export class CoreSources {
       const externalCode = error && typeof error === "object" && "code" in error ? String(error.code) : "";
       const code = error instanceof SourceFailure ? error.code : SAFE_CODES.has(externalCode) ? externalCode : "source_sync_failed";
       // No exception message, arguments, user content, or source-owned error text is logged.
-      console.error("[mind.core-sources]", { code });
+      console.error(JSON.stringify({ component: 'mind', event: 'source_sync_failed', error: code }));
       result.status = code === "RESTORE_BLOCKED" ? "blocked" : code === "learning_paused" ? "paused" : code === "source_call_failed" || code === "source_unavailable" || code === "FORBIDDEN" ? "unavailable" : "degraded";
       result.unknowns = [code]; result.coverage = { complete: false, gap: code };
       if (code === "source_unavailable" && !identity) {

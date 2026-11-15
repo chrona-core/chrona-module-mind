@@ -140,6 +140,8 @@ export class CoreExecutor {
  }
  private async settle(e:Execution){
   e=this.refresh(e.id);
+  // Visibility can change after the terminal read; confirm the original stop before releasing ownership.
+  if(e.runId&&e.stopRequested&&!e.stopConfirmed){e.status='unknown';this.journal.save(e);return;}
   if(e.facts.some(f=>f.status==='unknown')){e.status='unknown';e.error=this.contentCurrent(e)?'Original tool effect remains unknown; no new execution will start':null;this.journal.save(e);return;}
   e.status='settling';this.journal.save(e);
   await this.hooks.settle(e);e=this.journal.get(e.id);e.settled=true;e.status=e.terminalStatus==='finished'&&!e.stopRequested?'finished':'failed';e.args={};delete e.evidenceRefs;e.interactions=[];e.facts=e.facts.map(({output:_output,...f})=>f);this.journal.save(e);

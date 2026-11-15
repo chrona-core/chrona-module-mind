@@ -230,6 +230,11 @@ export class CoreRuntime {
  private recordSettled(){
   const executions=this.journal.all();
   for(const e of executions){
+   if(e.settled&&e.runId&&this.store.read().pursuits.some(p=>p.currentActor?.runRef===e.runId)&&!this.hasPendingVerification(e.id)){
+    // Recover ownership left behind by an older settlement, using the original stop receipt.
+    if(e.stopRequested&&!e.stopConfirmed){if(!this.journal.outstanding()){e.settled=false;e.status='unknown';this.journal.save(e);}}
+    else this.releaseActor(e,`${e.id}:release`);
+   }
    if(!e.basis)continue;
    // Recover an interrupted prepare-to-policy write from the original journal identity.
    this.journal.db.query('INSERT OR IGNORE INTO runtime_schedule(subject,basis,attempts,last_id) VALUES(?,?,?,?)').run(e.subject,e.basis,executions.filter(x=>x.subject===e.subject&&x.basis===e.basis).length,e.id);

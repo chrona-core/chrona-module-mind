@@ -8,6 +8,8 @@ import { Database } from "bun:sqlite";
 import { Observations } from "../chat/observations";
 import { CoreSources, type ResolveSource, type SourceCall, type SourceIngestor } from "./core-sources";
 import type { CoreAccess, IngestBatch } from "./core-types";
+import { z } from 'zod';
+import chatManifest from '../chat/module.json';
 
 const now = "2026-11-13T12:00:00.000Z";
 const identity = { moduleId: "actual-chat-module-id", hash: "approved-chat-hash", identityContinuityVerified: true };
@@ -51,6 +53,7 @@ describe("CoreSources pure Chat incremental synchronization", () => {
     const call: SourceCall = async (target, args) => {
       expect(target.moduleId).toBe(identity.moduleId);
       expect(["observations", "observation-scope", "observation-inventory", "snapshot"]).toContain(target.tool);
+      z.fromJSONSchema(chatManifest.tools.find(t => t.name === target.tool)!.parameters as unknown as Parameters<typeof z.fromJSONSchema>[0]).parse(args);
       calls.push({ tool: target.tool, args }); return handler(target.tool, args);
     };
     return { calls, call };
